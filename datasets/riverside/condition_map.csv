@@ -1,0 +1,27 @@
+system,code,condition_group,description
+SNOMED-CT,44054006,diabetes,Diabetes mellitus type 2 (disorder)
+SNOMED-CT,427089005,diabetes,Diabetes mellitus due to cystic fibrosis (disorder)
+SNOMED-CT,127013003,diabetes,Disorder of kidney due to diabetes mellitus (disorder)
+SNOMED-CT,90781000119102,diabetes,Microalbuminuria due to type 2 diabetes mellitus (disorder)
+SNOMED-CT,157141000119108,diabetes,Proteinuria due to type 2 diabetes mellitus (disorder)
+SNOMED-CT,368581000119106,diabetes,Neuropathy due to type 2 diabetes mellitus (disorder)
+SNOMED-CT,1551000119108,diabetes,Nonproliferative diabetic retinopathy due to type II diabetes mellitus
+SNOMED-CT,1501000119109,diabetes,Proliferative diabetic retinopathy due to type II diabetes mellitus
+SNOMED-CT,97331000119101,diabetes,Macular edema and retinopathy due to type 2 diabetes mellitus (disorder)
+SNOMED-CT,60951000119105,diabetes,Blindness due to type 2 diabetes mellitus (disorder)
+SNOMED-CT,59621000,hypertension,Essential hypertension (disorder)
+SNOMED-CT,185086009,copd,Chronic obstructive bronchitis (disorder)
+SNOMED-CT,87433001,copd,Pulmonary emphysema (disorder)
+SNOMED-CT,88805009,heart_failure,Chronic congestive heart failure (disorder)
+SNOMED-CT,84114007,heart_failure,Heart failure (disorder)
+SNOMED-CT,431855005,ckd,Chronic kidney disease stage 1 (disorder)
+SNOMED-CT,431856006,ckd,Chronic kidney disease stage 2 (disorder)
+SNOMED-CT,433144002,ckd,Chronic kidney disease stage 3 (disorder)
+SNOMED-CT,431857002,ckd,Chronic kidney disease stage 4 (disorder)
+SNOMED-CT,46177005,ckd,End-stage renal disease (disorder)
+SNOMED-CT,195967001,asthma,Asthma (disorder)
+SNOMED-CT,233678006,asthma,Childhood asthma (disorder)
+SNOMED-CT,370143000,depression,Major depressive disorder (disorder)
+SNOMED-CT,36923009,depression,"Major depression, single episode (disorder)"
+SNOMED-CT,162864005,obesity,Body mass index 30+ - obesity (finding)
+SNOMED-CT,408512008,obesity,Body mass index 40+ - severely obese (finding)

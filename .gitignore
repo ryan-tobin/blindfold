@@ -1,0 +1,35 @@
+# Secrets: only .env.example is commited
+.env
+.env.*
+!.env.example
+
+# Generated data: Synthea CSVs and the DuckDB file
+data/
+*.duckdb
+*.duckdb.wal 
+
+# Synthea release jar and other downloads
+.cache/
+*.jar 
+
+# Python 
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/
+
+# Node (UI, later)
+node_modules/
+
+# Rust (contract, later)
+target/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store 
+
