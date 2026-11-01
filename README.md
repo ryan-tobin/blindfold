@@ -21,6 +21,7 @@ python3 -m venv .venv && . .venv/bin/activate && pip install -e "./engine[dev]"
 make data   # downloads Synthea v4.0.0, generates 10,000 synthetic patients, builds 5 tables
 make test   # unit tests
 make sql    # check the demo question and show the SQL it compiles to
+make ask    # answer the demo question with differential-privacy noise
 ```
 
 ## What you should see
@@ -36,9 +37,22 @@ Built .../data/riverside.duckdb
   labs            325,355 rows
 ```
 
-`make test` then prints `97 passed`. Before `make data` it prints `80 passed, 17 skipped`, because the checks on the real tables need the database.
+`make test` then prints `133 passed`. Before `make data` it prints `114 passed, 19 skipped`, because the checks on the real tables need the database.
 
-`make sql` checks the demo question (`datasets/riverside/examples/readmit_diabetes_65plus_by_sex.json`), prints the parameterized SQL it compiles to, and runs it. The values it prints are the **true** answers with no noise yet; it's a developer check on the raw data, and the engine never returns these. Noise arrives on Day 3. To see a refusal instead, run `make sql SPEC=datasets/riverside/examples/attack_one_patient.json`: it prints the refusal as JSON and exits with code 2.
+The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65plus_by_sex.json`: of diabetic patients aged 65+ with an inpatient stay, what share were readmitted within 30 days, by sex? It counts each patient once, at ε 1.0.
+
+`make sql` checks it, prints the parameterized SQL it compiles to, and runs it. It prints the **true** answers (women 22 of 205, men 23 of 191). That's a developer check on the raw data; the engine never returns these.
+
+`make ask` gives the answer a buyer would get: the same question with differential-privacy noise, a 95% error bar and small-cell suppression. The numbers change on every run, for example:
+
+```text
+"display": "10.7% ± 1.3"     (women; true 10.7%)
+"display": "12.4% ± 1.4"     (men; true 12.0%)
+```
+
+`make ask TRIALS=500` (dev only) draws the noise 500 times and reports the typical error against the true values. At ε 1.0 the median error is about 0.3 percentage points and the ± bar holds the true value about 95% of the time.
+
+To see a refusal instead, run `make sql SPEC=datasets/riverside/examples/attack_one_patient.json`: it prints the refusal as JSON and exits with code 2.
 
 _TBD: expected output for each demo step._
 
@@ -52,7 +66,10 @@ _TBD_
 - **No SQL injection by construction.** `engine/blindfold/compile.py` builds SQL from a fixed template; table and column names come only from the schema, and every value is a `?` parameter.
 - **One patient can move an answer only so far.** After filters, each patient keeps at most `max_rows_per_patient` rows (5 admissions, 5 lab results, …) before anything is counted, and every group-by cell is returned, including empty ones. `compile.py` reports the resulting sensitivity for the noise step.
 - **No narrowing in on a person.** At most 2 group-by columns and 50 cells, at most 3 quasi-identifiers (sex, age band, ZIP3, county, admission and discharge dates) per question, and date ranges of at least 30 days.
-- _TBD: differential-privacy noise (Day 3), privacy budget and replay cache (Day 4), enclave and receipts (Days 6–7)._
+- **Every answer is differentially private.** `engine/blindfold/dp.py` adds discrete Laplace noise with scale sensitivity / ε to every count, drawn exactly with whole numbers and fractions from the OS's secure random source (`secrets`), so there is no floating-point rounding leak. Group-by cells and a rate's yes/no counts are disjoint, so a whole answer costs its ε once. Sums and means clip each value to the schema bounds and split ε between the sum and the count.
+- **Small groups are hidden.** A cell whose noisy count is below 20 is shown as `<20`.
+- **Every answer has an error bar.** A 95% interval for the noise comes with each value.
+- _TBD: privacy budget and replay cache (Day 4), enclave and receipts (Days 6–7)._
 
 ## Benchmark results
 
@@ -65,8 +82,9 @@ _TBD: table from `make bench`._
 - `engine/tests/test_load.py` (30): table schemas, identifier removal, `readmit_30d`, category values and lab bounds.
 - `engine/tests/test_spec.py` (45): valid QuerySpecs pass and normalise to one canonical form; 33 bad specs are each refused with the right rule and reason.
 - `engine/tests/test_compile.py` (22): exact answers on a hand-made database, the per-patient cap, empty cells, clipping, parameterized SQL, and runs on the real tables.
+- `engine/tests/test_dp.py` (36): chi-square tests of the noise sampler against the exact distribution, its mean and variance, exact 95% error bars and their coverage, the noise scale for each measure, suppression, clipping, and noisy answers on the real tables.
 
-_TBD: DP mechanisms, budget, contract._
+_TBD: budget, contract._
 
 ## Contract and enclave measurement
 
@@ -95,6 +113,7 @@ _Kept up to date as the build goes._
 - Synthea has no ZIP code for some towns; those patients get `zip3 = "unknown"`.
 - Contribution caps trade accuracy for privacy: a patient with more than 5 matching admissions or lab results counts only 5 (a fixed pseudo-random pick), so totals over heavy users are lower than the raw data. The benchmark measures this.
 - Depression and heart failure are rare in Synthea's living population (well under 1% of patients), so most questions about them will be suppressed as small cells.
+- Error bars cover the noise only, not sampling error. For rates and means they use a standard approximation; the tests check they hold the true value about 95% of the time.
 - `readmit_30d` near the end of the data (after Oct 1, 2026) can miss readmissions that happen after the data ends.
 
 ## License

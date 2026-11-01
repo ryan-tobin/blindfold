@@ -20,7 +20,7 @@ on them:
    matched. Leaving empty cells out would itself reveal something.
 
 The values returned here are the true, un-noised aggregates. They never leave
-the enclave: dp.py (Day 3) adds the noise before anything is answered.
+the enclave: dp.py adds the noise before anything is answered.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ OUTPUTS = {
     "count": ("n",),
     "histogram": ("n",),
     "rate": ("numerator", "denominator"),
-    "sum": ("sum",),
+    "sum": ("sum","n"), # n is only used to supress small cells
     "mean": ("sum", "n"),
 }
 
