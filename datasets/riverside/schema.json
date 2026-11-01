@@ -4,6 +4,17 @@
     "source": "Synthea v4.0.0, seed 20261101, Illinois, 10,000 living patients. No real person's data.",
     "as_of": "2026-10-31",
     "privacy_unit": "patient_id",
+    "query_rules": {
+      "measures": ["count", "sum", "mean", "rate", "histogram"],
+      "operators": ["=", "in", "between", "is"],
+      "max_group_by": 2,
+      "max_cells": 50,
+      "max_quasi_identifiers": 3,
+      "min_date_range_days": 30,
+      "max_epsilon": 1.0,
+      "default_epsilon": {"count": 0.1, "histogram": 0.1, "sum": 0.1, "mean": 0.2, "rate": 0.2},
+      "small_cell_threshold": 20
+    },
     "tables": {
       "patients": {
         "description": "One row per patient. Age and place are coarse by design.",
@@ -16,21 +27,25 @@
           },
           "sex": {
             "type": "VARCHAR",
+            "quasi_identifier": true,
             "categories": ["female", "male"],
             "description": "Sex recorded at birth."
           },
           "age_band": {
             "type": "VARCHAR",
+            "quasi_identifier": true,
             "categories": ["0-17", "18-34", "35-49", "50-64", "65-79", "80+"],
             "description": "Age on the as_of date, in bands."
           },
           "zip3": {
             "type": "VARCHAR",
+            "quasi_identifier": true,
             "categories": ["600", "601", "602", "603", "604", "605", "606", "607", "608", "609", "610", "611", "612", "613", "614", "615", "616", "617", "618", "619", "620", "622", "623", "624", "625", "626", "627", "628", "629", "636", "unknown"],
             "description": "First 3 digits of the home ZIP code; 'unknown' where Synthea has no ZIP for the town."
           },
           "county": {
             "type": "VARCHAR",
+            "quasi_identifier": true,
             "categories": ["Adams County", "Alexander County", "Bond County", "Boone County", "Brown County", "Bureau County", "Calhoun County", "Carroll County", "Cass County", "Champaign County", "Christian County", "Clark County", "Clay County", "Clinton County", "Coles County", "Cook County", "Crawford County", "Cumberland County", "De Witt County", "DeKalb County", "Douglas County", "DuPage County", "Edgar County", "Edwards County", "Effingham County", "Fayette County", "Ford County", "Franklin County", "Fulton County", "Gallatin County", "Greene County", "Grundy County", "Hamilton County", "Hancock County", "Hardin County", "Henderson County", "Henry County", "Iroquois County", "Jackson County", "Jasper County", "Jefferson County", "Jersey County", "Jo Daviess County", "Johnson County", "Kane County", "Kankakee County", "Kendall County", "Knox County", "LaSalle County", "Lake County", "Lawrence County", "Lee County", "Livingston County", "Logan County", "Macon County", "Macoupin County", "Madison County", "Marion County", "Marshall County", "Mason County", "Massac County", "McDonough County", "McHenry County", "McLean County", "Menard County", "Mercer County", "Monroe County", "Montgomery County", "Morgan County", "Moultrie County", "Ogle County", "Peoria County", "Perry County", "Piatt County", "Pike County", "Pope County", "Pulaski County", "Putnam County", "Randolph County", "Richland County", "Rock Island County", "Saline County", "Sangamon County", "Schuyler County", "Scott County", "Shelby County", "St. Clair County", "Stark County", "Stephenson County", "Tazewell County", "Union County", "Vermilion County", "Wabash County", "Warren County", "Washington County", "Wayne County", "White County", "Whiteside County", "Will County", "Williamson County", "Winnebago County", "Woodford County"],
             "description": "Home county."
           }
@@ -52,10 +67,12 @@
           },
           "admit_date": {
             "type": "DATE",
+            "quasi_identifier": true,
             "description": "Date the encounter started."
           },
           "discharge_date": {
             "type": "DATE",
+            "quasi_identifier": true,
             "description": "Date the encounter ended; stays still open on as_of end on as_of."
           },
           "encounter_class": {

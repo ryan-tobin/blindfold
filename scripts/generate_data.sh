@@ -13,14 +13,18 @@ SYNTHEA_URL="https://github.com/synthetichealth/synthea/releases/download/${SYNT
 
 SEED=20261101             # population seed and clinician seed
 REFERENCE_DATE=20261031   # "today" inside the simulation; must match as_of in schema.json
+END_DATE=$REFERENCE_DATE  # stop the simulation here; without it Synthea runs up to the moment you run it
 POPULATION=10000          # living patients (only_alive_patients=true makes this exact)
 STATE="Illinois"
+# Synthea reads the computer's time zone, and the same seed gives different
+# patients in New York and in UTC. Pin it so every machine gets the same data.
+TIMEZONE="UTC"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JAR_DIR="$ROOT/.cache/synthea"
 JAR="$JAR_DIR/synthea-with-dependencies-${SYNTHEA_VERSION}.jar"
 OUT="$ROOT/data/synthea"
-PARAMS="version=${SYNTHEA_VERSION} seed=${SEED} reference_date=${REFERENCE_DATE} population=${POPULATION} state=${STATE}"
+PARAMS="version=${SYNTHEA_VERSION} seed=${SEED} reference_date=${REFERENCE_DATE} end_date=${END_DATE} population=${POPULATION} state=${STATE} timezone=${TIMEZONE}"
 
 # 1. Java 17 or newer
 if ! command -v java >/dev/null 2>&1; then
@@ -59,8 +63,8 @@ fi
 rm -rf "$OUT"
 mkdir -p "$OUT"
 echo "Generating $POPULATION patients in $STATE (seed $SEED, as of $REFERENCE_DATE)..."
-java -jar "$JAR" \
-  -s "$SEED" -cs "$SEED" -r "$REFERENCE_DATE" -p "$POPULATION" \
+java -Duser.timezone="$TIMEZONE" -jar "$JAR" \
+  -s "$SEED" -cs "$SEED" -r "$REFERENCE_DATE" -e "$END_DATE" -p "$POPULATION" \
   --exporter.baseDirectory="$OUT" \
   --exporter.csv.export=true \
   --exporter.csv.included_files=patients.csv,encounters.csv,conditions.csv,medications.csv,observations.csv \

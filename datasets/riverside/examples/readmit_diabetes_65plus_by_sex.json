@@ -1,0 +1,13 @@
+{
+    "dataset": "riverside",
+    "measure": "rate",
+    "table": "admissions",
+    "numerator_filter": [["readmit_30d", "=", true]],
+    "filters": [
+      ["encounter_class", "=", "inpatient"],
+      ["patients.age_band", "in", ["65-79", "80+"]],
+      ["conditions.condition_group", "=", "diabetes"]
+    ],
+    "group_by": ["patients.sex"],
+    "epsilon": 0.2
+}

@@ -298,4 +298,7 @@ def test_schema_file_is_consistent():
     assert set(load.LAB_CODES.values()) == set(SCHEMA["tables"]["labs"]["columns"]["value"]["bounds_by_test"])
     script = (load.REPO_ROOT / "scripts" / "generate_data.sh").read_text(encoding="utf-8")
     assert f"REFERENCE_DATE={SCHEMA['as_of'].replace('-', '')}" in script
+    # Same data on every machine and every day: fixed time zone and end date.
+    assert 'TIMEZONE="UTC"' in script and '-Duser.timezone="$TIMEZONE"' in script
+    assert 'END_DATE=$REFERENCE_DATE' in script and '-e "$END_DATE"' in script
     json.dumps(SCHEMA)  # serialisable

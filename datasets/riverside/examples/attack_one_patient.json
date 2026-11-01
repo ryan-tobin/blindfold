@@ -1,0 +1,12 @@
+{
+    "dataset": "riverside",
+    "measure": "histogram",
+    "table": "conditions",
+    "column": "condition_group",
+    "filters": [
+      ["patients.sex", "=", "female"],
+      ["patients.age_band", "=", "65-79"],
+      ["patients.zip3", "=", "606"],
+      ["admissions.admit_date", "between", ["2026-03-03", "2026-03-03"]]
+    ]
+}
