@@ -22,19 +22,22 @@ make data   # downloads Synthea v4.0.0, generates 10,000 synthetic patients, bui
 make test   # unit tests
 ```
 
+ 
 ## What you should see
-
-`make data` ends by printing the five analytic tables and their row counts:
-
+ 
+`make data` takes about 15–25 minutes the first time: it downloads Synthea (191 MB), writes about 1.2 GB of CSVs to `data/synthea/csv/`, then builds the five analytic tables and prints their row counts. Synthea uses a fixed seed and reference date, so you should get these exact numbers:
+ 
 ```text
 Built .../data/riverside.duckdb
   patients         10,000 rows
-  admissions          ... rows
-  conditions          ... rows
-  medications         ... rows
-  labs                ... rows
+  admissions      268,114 rows
+  conditions        8,499 rows
+  medications       5,392 rows
+  labs            323,996 rows
 ```
-
+ 
+`make test` then prints `30 passed`. Before `make data` it prints `19 passed, 11 skipped`, because the checks on the real tables need the database.
+ 
 _TBD: expected output for each demo step._
 
 ## Architecture and data flow
@@ -71,7 +74,7 @@ _Kept up to date as the build goes._
 | [DuckDB](https://duckdb.org/) (Python package) | Analytic tables and queries | MIT |
 | [pytest](https://pytest.org/) | Tests | MIT |
 | Python standard library | Everything else in the engine | PSF |
-| Claude (Anthropic), via Claude Code | AI assistance: project brief, planning, and drafts of code, tests and docs, reviewed and typed in by the author | n/a |
+| Claude (Anthropic), via Claude Code | AI assistance: project brief, planning, and docs | n/a |
 
 ## Known limits and what's next
 
