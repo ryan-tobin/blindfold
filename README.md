@@ -14,7 +14,7 @@ _TBD: 30-second GIF and demo video link._
 
 ## Quickstart
 
-Prerequisites: Python 3.11+, Java 17+ (for Synthea), make and curl, plus [Rust](https://rustup.rs) and [cargo-near](https://github.com/near/cargo-near) 0.22 for the contract (`contract/rust-toolchain.toml` installs Rust 1.93.0 and the wasm target on first use). Docker and Node arrive with later days.
+Prerequisites: Python 3.11+, Java 17+ (for Synthea), make and curl, plus [Rust](https://rustup.rs) and [cargo-near](https://github.com/near/cargo-near) 0.22 for the contract (`contract/rust-toolchain.toml` installs Rust 1.93.0 and the wasm target on first use), and Docker for the simulated enclave. Node arrives with the UI.
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate && pip install -e "./engine[dev]"
@@ -23,8 +23,11 @@ make test   # engine and contract unit tests
 make sql    # check the demo question and show the SQL it compiles to
 make ask    # answer the demo question with differential-privacy noise
 make serve  # start the engine's HTTP service on http://127.0.0.1:8000 (leave it running)
-make query  # in a second terminal: ask the running service, get the answer and a receipt
+make query  # in a second terminal: ask the running service, get the answer and a signed receipt
+make verify REQUEST=1  # check that receipt's signature and the enclave that signed it
 ```
+
+To run the engine in a simulated enclave instead, use Docker: `make up` (the first build compiles Phala's dstack simulator, 10–20 minutes), then the same `make query` and `make verify REQUEST=1`. Docker reads `CONTRACT_ID` from `.env`; leave it blank (or run `CONTRACT_ID= make up`) for this local run.
 
 ## What you should see
 
@@ -39,7 +42,7 @@ Built .../data/riverside.duckdb
   labs            325,355 rows
 ```
 
-`make test` then prints `157 passed` for the engine, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `137 passed, 20 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
+`make test` then prints `186 passed` for the engine, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `166 passed, 20 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
 
 The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65plus_by_sex.json`: of diabetic patients aged 65+ with an inpatient stay, what share were readmitted within 30 days, by sex? It counts each patient once, at ε 1.0.
 
@@ -56,18 +59,34 @@ The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65pl
 
 To see a refusal instead, run `make sql SPEC=datasets/riverside/examples/attack_one_patient.json`: it prints the refusal as JSON and exits with code 2.
 
-`make serve` starts the engine as a web service. Open http://127.0.0.1:8000/docs for the interactive API docs. It has four endpoints:
+`make serve` starts the engine as a web service. Open http://127.0.0.1:8000/docs for the interactive API docs. It has six endpoints:
 
 | Endpoint | What it does |
 | --- | --- |
 | `GET /schema` | The public schema: tables, columns, categories and the query rules |
 | `GET /budget` | The privacy budget: total (10), spent, remaining, and whether the dataset is closed |
-| `POST /query` | `{"buyer": "alice.testnet", "spec": {...}}`: a noisy answer or a refusal, always with a receipt |
+| `POST /query` | `{"buyer": "alice.testnet", "spec": {...}}` (or `{"request_id": 7, ...}` in chain mode): a noisy answer or a refusal, always with a signed receipt |
 | `GET /receipt/{id}` | The receipt of an earlier request |
+| `GET /attestation` | The enclave's mode, public keys, report_data and quote |
+| `GET /info` | Mode, app id, compose hash, NEAR account and contract |
 
-With the service running, `make query` (in a second terminal) sends the demo question as `alice.testnet` and prints the answer and its receipt. The receipt shows `"epsilon_charged": 1.0` and `"epsilon_remaining": 9.0`. Run `make query` again and you get the exact same numbers back, with `"replay_of": 1` and `"epsilon_charged": 0.0`: a repeated question costs nothing and can't be averaged. `make query SPEC=datasets/riverside/examples/attack_one_patient.json` is refused (`too_fine`) and costs nothing. Receipts are unsigned until the enclave signs them (Day 6).
+With the service running, `make query` (in a second terminal) sends the demo question as `alice.testnet` and prints the answer and its receipt. The receipt shows `"epsilon_charged": 1.0` and `"epsilon_remaining": 9.0`. Run `make query` again and you get the exact same numbers back, with `"replay_of": 1` and `"epsilon_charged": 0.0`: a repeated question costs nothing and can't be averaged. `make query SPEC=datasets/riverside/examples/attack_one_patient.json` is refused (`too_fine`) and costs nothing. Every receipt is signed by the enclave's ed25519 key. `make verify REQUEST=1` checks it: the receipt hash, the signature, that the key is the engine's, and that the attestation binds the keys to the schema. Without Docker the engine runs in **dev** mode (a local key in `data/dev_enclave.key`, no quote), and the verifier marks it in yellow.
 
 The budget, the replay cache and the receipts live in `data/state.sqlite`, so they survive a restart. `make reset` deletes that file to start the budget again at 10.
+
+### The enclave and the chain
+
+`make up` runs the engine next to Phala's dstack simulator, which gives it the same API as a real Intel TDX enclave. The engine derives two keys from dstack (`engine/blindfold/enclave.py`): an ed25519 **signer** that signs every receipt and is also the enclave's own NEAR account (the implicit account named by its public key), and an X25519 **encryption** key the data owner encrypts the bundle to (Day 7). It puts `sha256(signer key + encryption key + schema hash)` into the attestation quote's report_data, so the quote binds both keys and the schema to the code. In the simulator the quote is a fixed sample, so `/attestation` says `"simulated": true` and the verifier shows it in yellow.
+
+With `CONTRACT_ID` set (in `.env` for Docker, or `make serve CONTRACT_ID=...`), the engine runs in **chain mode**:
+
+1. The buyer calls `request_query(dataset_id, spec_hash, epsilon)` on the contract, which escrows the price and returns a request id.
+2. The buyer sends `{"request_id": 7, "spec": {...}}` to `/query`. The engine reads the request on-chain and refuses the question (rule 6, `spec_mismatch`) if its canonical hash or ε isn't the one paid for.
+3. The engine answers or refuses, signs the receipt, and calls `settle` with the receipt hash, signed by its own account (`engine/blindfold/chain.py`, `engine/blindfold/near.py`). Answered pays the owner and charges ε; refused refunds the buyer.
+
+The engine reads `epsilon_total` and `epsilon_spent` from the contract and uses the larger of the contract's and its own ledger, so neither a restart nor a lost transaction can overspend. If `settle` fails, the engine keeps the answer and returns an error; sending the same request id again settles it without charging ε twice.
+
+`make register-enclave CONTRACT_ID=... ADMIN=...` funds the enclave's account with 1 NEAR for gas and registers it on the contract. `make pay CONTRACT_ID=... BUYER=...` pays for the demo question on-chain and asks the engine (the buyer's key comes from near-cli's legacy keychain). `make verify REQUEST=<id> CONTRACT_ID=...` then also checks that the enclave is the registered one and that the request was settled with this exact receipt hash.
 
 _TBD: expected output for each demo step._
 
@@ -90,7 +109,8 @@ _TBD_
 - **A receipt for every request.** Answered or refused, each request gets a receipt with the hash of the question, the hash of the answer, the ε charged and the ε left (`engine/blindfold/receipts.py`). Refusals cost no budget.
 - **Payments, limits and the budget are public, on NEAR.** `contract/src/lib.rs` holds each dataset's price and privacy budget, escrows the fee for every question, and records ε spent and the receipt hash when the enclave settles. A refused question refunds the fee and is logged on-chain with its rule. Pending questions reserve their ε, so they can't overspend the budget together, and the contract won't let the enclave charge more ε than the buyer asked for.
 - **An agent can buy answers but can't drain the wallet.** The buyer deposits USDC once and sets a per-question and a daily cap. Changing caps and withdrawing need 1 yoctoNEAR attached, which a NEAR function-call key can't attach, so an agent holding only a key for `request_query` can spend within the caps and nothing else.
-- _TBD: enclave signing and attestation (Days 6–7)._
+- **Every receipt is signed inside the enclave.** The signer key is derived by dstack from the app's identity and never leaves the enclave. The quote binds it, the encryption key and the schema hash together, and the contract only accepts `settle` from that key's account, so a receipt hash on-chain means the enclave signed it (`engine/blindfold/enclave.py`, `engine/blindfold/receipts.py`, `verify/verify.py`).
+- **The engine can only charge what was paid for.** In chain mode a question must match the spec hash and ε of a paid request, or it is refused and refunded (`engine/blindfold/app.py`). A request is answered and settled once.
 
 ## Benchmark results
 
@@ -106,16 +126,18 @@ _TBD: table from `make bench`._
 - `engine/tests/test_dp.py` (36): chi-square tests of the noise sampler against the exact distribution, its mean and variance, exact 95% error bars and their coverage, the noise scale for each measure, suppression, clipping, and noisy answers on the real tables.
 - `engine/tests/test_budget.py` (8): exact budget sums, the replay cache, the rate-limit counter, state that survives a restart, rollback on failure, and receipt hashes.
 - `engine/tests/test_app.py` (16): the HTTP service end to end: answers with receipts, free identical replays, the averaging attack, a refusal for each rule, the budget running out, the rate limit, a restart, and the demo question on the real tables.
+- `engine/tests/test_enclave.py` (14): keys from a fake dstack agent over a unix socket and HTTP, report_data in the quote, dev-mode keys, and signed receipts that break when any field changes.
+- `engine/tests/test_chain.py` (15): chain mode against a fake contract: paid questions settle, replays cost no ε, mismatched or bad specs are refused and refunded, a request is answered once, a failed settle retries for free, the budget follows the contract, plus NEAR transaction bytes checked against py-near and base58.
 - `contract/src/tests.rs` (19): answered questions pay the owner and spend ε; refusals refund and cost nothing; a free replay; only the enclave settles, once, and never for more ε than requested; per-question and daily caps and the daily reset; an agent key can't raise its caps; pending questions reserve the budget; closed datasets; owner-only updates; expiry refunds; USDC-only deposits; unique dataset ids; the recent-queries feed.
 
 ## Contract and enclave measurement
 
-Contract on NEAR testnet: `CONTRACT_ID` _(filled in after deploy)_. Build it with `make contract`; cargo-near prints the wasm's SHA-256.
+Contract on NEAR testnet: [`blindfold.ryan-tobin.testnet`](https://testnet.nearblocks.io/address/blindfold.ryan-tobin.testnet). Build it with `make contract`; cargo-near prints the wasm's SHA-256. The enclave registered there today is the simulated one (Day 6); the real TDX enclave replaces it on Day 7.
 
 | Method | Who calls it | What it does |
 | --- | --- | --- |
 | `new(admin, usdc_contract, expiry_blocks)` | once, at deploy | Sets the admin, the USDC token and how long a question can stay unsettled |
-| `register_enclave(...)` | admin | Records the enclave's account, public keys, compose hash and quote hash (Day 6) |
+| `register_enclave(...)` | admin | Records the enclave's account, public keys, compose hash and quote hash (`make register-enclave`) |
 | `register_dataset(id, schema_hash, bundle_hash, price, epsilon_total)` | data owner | Lists a dataset (`make register`) |
 | `update_dataset(id, bundle_hash?, price?, active?)` | data owner | Sets the bundle hash, price, or closes the dataset. The budget can't change |
 | `ft_on_transfer` | USDC, after the buyer's `ft_transfer_call` with `{"action":"deposit"}` | Credits the buyer |
@@ -146,6 +168,8 @@ _Kept up to date as the build goes._
 | [FastAPI](https://fastapi.tiangolo.com/) and [Starlette](https://starlette.dev/) | The engine's HTTP service and its docs page | MIT, BSD-3-Clause |
 | [Uvicorn](https://uvicorn.dev/) | Runs the HTTP service | BSD-3-Clause |
 | [httpx2](https://github.com/pydantic/httpx2) (tests only) | FastAPI's test client needs it | BSD-3-Clause |
+| [PyNaCl](https://github.com/pyca/pynacl) 1.6.2 | ed25519 receipt and transaction signatures, X25519 keys | Apache 2.0 |
+| [dstack](https://github.com/Dstack-TEE/dstack) v0.6.1 simulator | The simulated enclave. Built from source by `docker/simulator/Dockerfile`, adapted from dstack's own simulator Dockerfile | Apache 2.0 |
 | [pytest](https://pytest.org/) | Tests | MIT |
 | [near-sdk-rs](https://github.com/near/near-sdk-rs) 5.29.1 | The NEAR contract | MIT or Apache 2.0 |
 | [cargo-near](https://github.com/near/cargo-near) 0.22.0 | Builds the contract; project layout from `cargo near new` | MIT or Apache 2.0 |
@@ -161,7 +185,8 @@ _Kept up to date as the build goes._
 - Depression and heart failure are rare in Synthea's living population (well under 1% of patients), so most questions about them will be suppressed as small cells.
 - Error bars cover the noise only, not sampling error. For rates and means they use a standard approximation; the tests check they hold the true value about 95% of the time.
 - `readmit_30d` near the end of the data (after Oct 1, 2026) can miss readmissions that happen after the data ends.
-- The engine doesn't talk to the contract yet: the buyer in `/query` is still a name the caller types, and the budget lives in the engine's own ledger. The enclave reads `epsilon_spent` from the contract and calls `settle` from Day 6 on, and buyers pay on-chain from Day 9.
+- The simulated enclave's keys come from the simulator's public sample key file, so anyone can derive them. A simulated enclave registered on testnet proves nothing; the real TDX deployment (Day 7) replaces it.
+- Without `CONTRACT_ID` the engine runs in local mode: the buyer in `/query` is a name the caller types and nobody pays. Buyers pay with USDC from Day 9; until then `make pay` works on a dataset whose price is 0.
 - Trust model: the contract doesn't check the Intel TDX quote itself, which is too heavy for a contract. It trusts one registered enclave account, whose key exists only inside the enclave, and stores the quote hash so anyone can check it off-chain.
 - The contract account pays NEAR storage for every question it records (a few hundred bytes each).
 

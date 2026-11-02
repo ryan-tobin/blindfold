@@ -1,8 +1,9 @@
 """Privacy budget ledger, replay cache and rate limit (refusal rules 4 and 5).
 
 State lives in one small SQLite file (Python's standard library), so a
-restart can't reset the budget or empty the replay cache. From Day 5 the
-contract's epsilon_spent is the source of truth and this file is a local copy.
+restart can't reset the budget or empty the replay cache. The contract's epsilon_spent
+is the public record. In chain mode the engine uses whichever is larger, so neither a
+lost settle nor a reset file can overspend.
 
 - Ledger: every new answer charges its epsilon, and costs add up (basic
   composition). Amounts are stored as exact fractions ("1/10"), so 100
@@ -82,13 +83,27 @@ class State:
     def receipt(self, request_id: int) -> dict | None:
         row = self.con.execute("SELECT receipt FROM requests WHERE id = ?", (request_id,)).fetchone()
         return json.loads(row[0]) if row else None
+    
+    def answer_for(self, receipt: dict) -> dict | None:
+        if receipt["status"] != "answered":
+            return None
+        row = self.con.execute("SELECT answer FROM answers WHERE request_id = ?",
+                               (receipt["replay_of"] or receipt["request_id"],)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def log(self, dataset: str, buyer: str, ts: float, status: str, rule: str | None,
-            make_receipt: Callable[[int], dict], charge: tuple[str, Fraction, dict] | None = None) -> dict:
-        with self.con:
-            cur =  self.con.execute(
-                "INSERT INTO requests (dataset, buyer, ts, status, rule) VALUES (?, ?, ?, ?, ?)",
-                (dataset, buyer, ts, status, rule),
+            make_receipt: Callable[[int], dict], charge: tuple[str, Fraction, dict] | None = None,
+            request_id: int | None = None) -> dict:
+        """Record one request in a single transaction and return its receipt.
+
+        make_receipt gets the request id: request_id if given (the on-chain
+        id in chain mode), else the next local one. charge = (spec_hash,
+        epsilon, answer) for a new answer: it spends the budget and fills the cache.
+        """
+        with self.con:  # commits on success, rolls back on any error
+            cur = self.con.execute(
+                "INSERT INTO requests (id, dataset, buyer, ts, status, rule) VALUES (?, ?, ?, ?, ?, ?)",
+                (request_id, dataset, buyer, ts, status, rule),
             )
             request_id = cur.lastrowid
             receipt = make_receipt(request_id)

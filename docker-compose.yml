@@ -1,4 +1,39 @@
-# Local mode: engine + UI
+# Local mode: the engine in a simulated enclave, on http://127.0.0.1:8000
+#
+#     docker compose up --build
+#
+# The first build compiles Phala's dstack simulator from source (10-20 minutes).
+# The engine reads data/riverside.duckdb (run `make data` first) and keeps its
+# state in data/. With CONTRACT_ID set in .env it runs in chain mode.
 name: blindfold
 
-servies: {}
+services:
+  dstack-simulator:
+    build: docker/simulator
+    volumes:
+      - dstack-sock:/var/run/dstack
+    healthcheck:
+      test: ["CMD", "test", "-S", "/var/run/dstack/dstack.sock"]
+      interval: 2s
+      retries: 30
+
+  engine:
+    build:
+      context: .
+      dockerfile: engine/Dockerfile
+    depends_on:
+      dstack-simulator:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DSTACK_SIMULATOR_ENDPOINT: /var/run/dstack/dstack.sock
+      CONTRACT_ID: ${CONTRACT_ID:-}
+      NEAR_NETWORK: ${NEAR_NETWORK:-testnet}
+      NEAR_RPC_URL: ${NEAR_RPC_URL:-}
+    volumes:
+      - dstack-sock:/var/run/dstack
+      - ./data:/app/data
+
+volumes:
+  dstack-sock:

@@ -1,0 +1,12 @@
+# Keep the build context small: no data, no builds, no secrets
+data/
+.cache/
+.venv/
+venv/
+**/__pycache__/
+**/*.egg-info/
+contract/target/
+ui/node_modules/
+.env
+.env.*
+.git/

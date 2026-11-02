@@ -83,7 +83,7 @@ def test_answer_comes_with_a_receipt_and_charges_the_budget(tiny_db, tmp_path):
     assert r["spec_hash"] == receipts.spec_hash(canon)
     assert r["answer_hash"] == receipts.sha256_hex(out["answer"])
     assert (r["status"], r["epsilon_charged"], r["epsilon_remaining"]) == ("answered", 1.0, 9.0)
-    assert r["sig"] is None and r["signer_pubkey"] is None  # signed from Day 6
+    assert receipts.signature_ok(r)  # signed from Day 6
     assert out["receipt_hash"] == receipts.receipt_hash(r)
     assert client.get("/budget").json()["epsilon_remaining"] == 9.0
     assert client.get("/receipt/1").json() == {"receipt": r, "receipt_hash": out["receipt_hash"]}

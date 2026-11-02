@@ -168,7 +168,7 @@ def test_attack_example_is_refused():
 def test_refusal_payload():
     d = refused(spec(measure="rows")).to_dict()
     assert d == {"refused": True, "rule": NOT_AGGREGATE, "rule_number": 1, "reason": d["reason"]}
-    assert set(RULES.values()) == {1, 2, 3, 4, 5}
+    assert set(RULES.values()) == {1, 2, 3, 4, 5, 6}
     with pytest.raises(ValueError):
         Refused("because", "no such rule")
 
