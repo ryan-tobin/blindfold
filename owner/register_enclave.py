@@ -23,7 +23,7 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
-from engine.blindfold import attest
+from blindfold import attest
 
 
 def run(cmd: list[str], dry_run: bool) -> None:
