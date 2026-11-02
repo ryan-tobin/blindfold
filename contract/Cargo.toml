@@ -1,0 +1,36 @@
+[package]
+name = "blindfold"
+description = "Blindfold: datasets, query escrow, privacy budget and receipts on NEAR"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+repository = "https://github.com/ryan-tobin/blindfold"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Reproducible build (NEP-330): judges can rebuild the wasm and match its hash.
+[package.metadata.near.reproducible_build]
+image = "sourcescan/cargo-near:0.21.1-rust-1.96.0"
+image_digest = "sha256:ccb22bb4e677ed022d8b9d1aa1b32f0af52dd0471ef1c32e48dedbf68ee6ee17"
+passed_env = []
+container_build_command = ["cargo", "near", "build", "non-reproducible-wasm", "--locked"]
+
+[dependencies]
+near-sdk = "=5.29.1"
+
+[dev-dependencies]
+near-sdk = { version = "=5.29.1", features = ["unit-testing"] }
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+debug = false
+panic = "abort"
+overflow-checks = true
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ['cfg(near)']

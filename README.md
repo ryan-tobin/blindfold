@@ -14,12 +14,12 @@ _TBD: 30-second GIF and demo video link._
 
 ## Quickstart
 
-Prerequisites: Python 3.11+, Java 17+ (for Synthea), make and curl. Docker and Node arrive with later days.
+Prerequisites: Python 3.11+, Java 17+ (for Synthea), make and curl, plus [Rust](https://rustup.rs) and [cargo-near](https://github.com/near/cargo-near) 0.22 for the contract (`contract/rust-toolchain.toml` installs Rust 1.93.0 and the wasm target on first use). Docker and Node arrive with later days.
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate && pip install -e "./engine[dev]"
 make data   # downloads Synthea v4.0.0, generates 10,000 synthetic patients, builds 5 tables
-make test   # unit tests
+make test   # engine and contract unit tests
 make sql    # check the demo question and show the SQL it compiles to
 make ask    # answer the demo question with differential-privacy noise
 make serve  # start the engine's HTTP service on http://127.0.0.1:8000 (leave it running)
@@ -39,7 +39,7 @@ Built .../data/riverside.duckdb
   labs            325,355 rows
 ```
 
-`make test` then prints `157 passed`. Before `make data` it prints `137 passed, 20 skipped`, because the checks on the real tables need the database.
+`make test` then prints `157 passed` for the engine, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `137 passed, 20 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
 
 The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65plus_by_sex.json`: of diabetic patients aged 65+ with an inpatient stay, what share were readmitted within 30 days, by sex? It counts each patient once, at ε 1.0.
 
@@ -88,6 +88,8 @@ _TBD_
 - **No averaging attack.** The same question asked again, by anyone, returns the stored noisy answer at no cost (the replay cache). Asking 1,000 times gives the same noise 1,000 times. Questions are matched on their canonical form, so rewording the JSON doesn't get fresh noise.
 - **A rate limit.** At most 30 requests per buyer in any rolling hour, refusals and repeats included.
 - **A receipt for every request.** Answered or refused, each request gets a receipt with the hash of the question, the hash of the answer, the ε charged and the ε left (`engine/blindfold/receipts.py`). Refusals cost no budget.
+- **Payments, limits and the budget are public, on NEAR.** `contract/src/lib.rs` holds each dataset's price and privacy budget, escrows the fee for every question, and records ε spent and the receipt hash when the enclave settles. A refused question refunds the fee and is logged on-chain with its rule. Pending questions reserve their ε, so they can't overspend the budget together, and the contract won't let the enclave charge more ε than the buyer asked for.
+- **An agent can buy answers but can't drain the wallet.** The buyer deposits USDC once and sets a per-question and a daily cap. Changing caps and withdrawing need 1 yoctoNEAR attached, which a NEAR function-call key can't attach, so an agent holding only a key for `request_query` can spend within the caps and nothing else.
 - _TBD: enclave signing and attestation (Days 6–7)._
 
 ## Benchmark results
@@ -104,12 +106,29 @@ _TBD: table from `make bench`._
 - `engine/tests/test_dp.py` (36): chi-square tests of the noise sampler against the exact distribution, its mean and variance, exact 95% error bars and their coverage, the noise scale for each measure, suppression, clipping, and noisy answers on the real tables.
 - `engine/tests/test_budget.py` (8): exact budget sums, the replay cache, the rate-limit counter, state that survives a restart, rollback on failure, and receipt hashes.
 - `engine/tests/test_app.py` (16): the HTTP service end to end: answers with receipts, free identical replays, the averaging attack, a refusal for each rule, the budget running out, the rate limit, a restart, and the demo question on the real tables.
-
-_TBD: contract._
+- `contract/src/tests.rs` (19): answered questions pay the owner and spend ε; refusals refund and cost nothing; a free replay; only the enclave settles, once, and never for more ε than requested; per-question and daily caps and the daily reset; an agent key can't raise its caps; pending questions reserve the budget; closed datasets; owner-only updates; expiry refunds; USDC-only deposits; unique dataset ids; the recent-queries feed.
 
 ## Contract and enclave measurement
 
-_TBD: testnet contract address and enclave code hash._
+Contract on NEAR testnet: `CONTRACT_ID` _(filled in after deploy)_. Build it with `make contract`; cargo-near prints the wasm's SHA-256.
+
+| Method | Who calls it | What it does |
+| --- | --- | --- |
+| `new(admin, usdc_contract, expiry_blocks)` | once, at deploy | Sets the admin, the USDC token and how long a question can stay unsettled |
+| `register_enclave(...)` | admin | Records the enclave's account, public keys, compose hash and quote hash (Day 6) |
+| `register_dataset(id, schema_hash, bundle_hash, price, epsilon_total)` | data owner | Lists a dataset (`make register`) |
+| `update_dataset(id, bundle_hash?, price?, active?)` | data owner | Sets the bundle hash, price, or closes the dataset. The budget can't change |
+| `ft_on_transfer` | USDC, after the buyer's `ft_transfer_call` with `{"action":"deposit"}` | Credits the buyer |
+| `set_limits(per_query_max, daily_max)` | buyer, full key, 1 yoctoNEAR | Agent spending caps |
+| `request_query(dataset_id, spec_hash, epsilon)` | buyer's agent, function-call key | Checks caps, balance and budget, escrows the price, returns the request id |
+| `settle(request_id, status, receipt_hash, epsilon_charged, refusal?)` | enclave account only | Answered pays the owner and spends ε; refused refunds |
+| `expire(request_id)` | anyone, after `expiry_blocks` | Refunds a question nobody settled |
+| `withdraw(amount)` | buyer or owner, 1 yoctoNEAR | Sends USDC out; puts it back if the transfer fails |
+| `get_config`, `get_dataset`, `list_datasets`, `get_enclave`, `get_request`, `get_balance`, `list_recent` | anyone | Views |
+
+Units: amounts are USDC's smallest unit (6 decimals, so $0.25 = `"250000"`) and ε is in millionths (1.0 = `1000000`), so the budget adds up exactly. Every change emits a NEP-297 event (`EVENT_JSON:{"standard":"blindfold",...}`).
+
+Enclave code hash: _TBD (Day 7)._
 
 ## Built during the hackathon
 
@@ -128,6 +147,9 @@ _Kept up to date as the build goes._
 | [Uvicorn](https://uvicorn.dev/) | Runs the HTTP service | BSD-3-Clause |
 | [httpx2](https://github.com/pydantic/httpx2) (tests only) | FastAPI's test client needs it | BSD-3-Clause |
 | [pytest](https://pytest.org/) | Tests | MIT |
+| [near-sdk-rs](https://github.com/near/near-sdk-rs) 5.29.1 | The NEAR contract | MIT or Apache 2.0 |
+| [cargo-near](https://github.com/near/cargo-near) 0.22.0 | Builds the contract; project layout from `cargo near new` | MIT or Apache 2.0 |
+| [near-cli-rs](https://github.com/near/near-cli-rs) 0.30.1 | Creates accounts, deploys, and signs calls from `owner/register.py` | MIT or Apache 2.0 |
 | Python standard library | Everything else in the engine, including SQLite for the budget ledger | PSF |
 | Claude (Anthropic), via Claude Code | AI assistance: project brief, planning, and docs | n/a |
 
@@ -139,7 +161,9 @@ _Kept up to date as the build goes._
 - Depression and heart failure are rare in Synthea's living population (well under 1% of patients), so most questions about them will be suppressed as small cells.
 - Error bars cover the noise only, not sampling error. For rates and means they use a standard approximation; the tests check they hold the true value about 95% of the time.
 - `readmit_30d` near the end of the data (after Oct 1, 2026) can miss readmissions that happen after the data ends.
-- Until the contract arrives (Day 5), the buyer in `/query` is a name the caller types, so the rate limit is per name. On-chain requests will tie it to a paying NEAR account.
+- The engine doesn't talk to the contract yet: the buyer in `/query` is still a name the caller types, and the budget lives in the engine's own ledger. The enclave reads `epsilon_spent` from the contract and calls `settle` from Day 6 on, and buyers pay on-chain from Day 9.
+- Trust model: the contract doesn't check the Intel TDX quote itself, which is too heavy for a contract. It trusts one registered enclave account, whose key exists only inside the enclave, and stores the quote hash so anyone can check it off-chain.
+- The contract account pays NEAR storage for every question it records (a few hundred bytes each).
 
 ## License
 
