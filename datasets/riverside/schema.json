@@ -13,7 +13,8 @@
       "min_date_range_days": 30,
       "max_epsilon": 1.0,
       "default_epsilon": {"count": 0.1, "histogram": 0.1, "sum": 0.1, "mean": 0.2, "rate": 0.2},
-      "small_cell_threshold": 20
+      "small_cell_threshold": 20,
+      "rate_limit_per_hour": 30
     },
     "tables": {
       "patients": {

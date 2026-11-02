@@ -14,7 +14,7 @@ _TBD: 30-second GIF and demo video link._
 
 ## Quickstart
 
-Prerequisites: Python 3.11+, Java 17+ (for Synthea), make. Docker and Node arrive with later days.
+Prerequisites: Python 3.11+, Java 17+ (for Synthea), make and curl. Docker and Node arrive with later days.
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate && pip install -e "./engine[dev]"
@@ -22,6 +22,8 @@ make data   # downloads Synthea v4.0.0, generates 10,000 synthetic patients, bui
 make test   # unit tests
 make sql    # check the demo question and show the SQL it compiles to
 make ask    # answer the demo question with differential-privacy noise
+make serve  # start the engine's HTTP service on http://127.0.0.1:8000 (leave it running)
+make query  # in a second terminal: ask the running service, get the answer and a receipt
 ```
 
 ## What you should see
@@ -37,7 +39,7 @@ Built .../data/riverside.duckdb
   labs            325,355 rows
 ```
 
-`make test` then prints `133 passed`. Before `make data` it prints `114 passed, 19 skipped`, because the checks on the real tables need the database.
+`make test` then prints `157 passed`. Before `make data` it prints `137 passed, 20 skipped`, because the checks on the real tables need the database.
 
 The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65plus_by_sex.json`: of diabetic patients aged 65+ with an inpatient stay, what share were readmitted within 30 days, by sex? It counts each patient once, at ε 1.0.
 
@@ -54,6 +56,19 @@ The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65pl
 
 To see a refusal instead, run `make sql SPEC=datasets/riverside/examples/attack_one_patient.json`: it prints the refusal as JSON and exits with code 2.
 
+`make serve` starts the engine as a web service. Open http://127.0.0.1:8000/docs for the interactive API docs. It has four endpoints:
+
+| Endpoint | What it does |
+| --- | --- |
+| `GET /schema` | The public schema: tables, columns, categories and the query rules |
+| `GET /budget` | The privacy budget: total (10), spent, remaining, and whether the dataset is closed |
+| `POST /query` | `{"buyer": "alice.testnet", "spec": {...}}`: a noisy answer or a refusal, always with a receipt |
+| `GET /receipt/{id}` | The receipt of an earlier request |
+
+With the service running, `make query` (in a second terminal) sends the demo question as `alice.testnet` and prints the answer and its receipt. The receipt shows `"epsilon_charged": 1.0` and `"epsilon_remaining": 9.0`. Run `make query` again and you get the exact same numbers back, with `"replay_of": 1` and `"epsilon_charged": 0.0`: a repeated question costs nothing and can't be averaged. `make query SPEC=datasets/riverside/examples/attack_one_patient.json` is refused (`too_fine`) and costs nothing. Receipts are unsigned until the enclave signs them (Day 6).
+
+The budget, the replay cache and the receipts live in `data/state.sqlite`, so they survive a restart. `make reset` deletes that file to start the budget again at 10.
+
 _TBD: expected output for each demo step._
 
 ## Architecture and data flow
@@ -69,7 +84,11 @@ _TBD_
 - **Every answer is differentially private.** `engine/blindfold/dp.py` adds discrete Laplace noise with scale sensitivity / ε to every count, drawn exactly with whole numbers and fractions from the OS's secure random source (`secrets`), so there is no floating-point rounding leak. Group-by cells and a rate's yes/no counts are disjoint, so a whole answer costs its ε once. Sums and means clip each value to the schema bounds and split ε between the sum and the count.
 - **Small groups are hidden.** A cell whose noisy count is below 20 is shown as `<20`.
 - **Every answer has an error bar.** A 95% interval for the noise comes with each value.
-- _TBD: privacy budget and replay cache (Day 4), enclave and receipts (Days 6–7)._
+- **A total privacy budget.** The dataset has a budget of ε 10. Every new answer spends its ε, and costs add up. Spending is kept in exact fractions, so 100 questions at 0.1 spend exactly 10. A question that needs more ε than is left is refused, and at zero the dataset closes to new questions (`engine/blindfold/budget.py`, `engine/blindfold/app.py`).
+- **No averaging attack.** The same question asked again, by anyone, returns the stored noisy answer at no cost (the replay cache). Asking 1,000 times gives the same noise 1,000 times. Questions are matched on their canonical form, so rewording the JSON doesn't get fresh noise.
+- **A rate limit.** At most 30 requests per buyer in any rolling hour, refusals and repeats included.
+- **A receipt for every request.** Answered or refused, each request gets a receipt with the hash of the question, the hash of the answer, the ε charged and the ε left (`engine/blindfold/receipts.py`). Refusals cost no budget.
+- _TBD: enclave signing and attestation (Days 6–7)._
 
 ## Benchmark results
 
@@ -83,8 +102,10 @@ _TBD: table from `make bench`._
 - `engine/tests/test_spec.py` (45): valid QuerySpecs pass and normalise to one canonical form; 33 bad specs are each refused with the right rule and reason.
 - `engine/tests/test_compile.py` (22): exact answers on a hand-made database, the per-patient cap, empty cells, clipping, parameterized SQL, and runs on the real tables.
 - `engine/tests/test_dp.py` (36): chi-square tests of the noise sampler against the exact distribution, its mean and variance, exact 95% error bars and their coverage, the noise scale for each measure, suppression, clipping, and noisy answers on the real tables.
+- `engine/tests/test_budget.py` (8): exact budget sums, the replay cache, the rate-limit counter, state that survives a restart, rollback on failure, and receipt hashes.
+- `engine/tests/test_app.py` (16): the HTTP service end to end: answers with receipts, free identical replays, the averaging attack, a refusal for each rule, the budget running out, the rate limit, a restart, and the demo question on the real tables.
 
-_TBD: budget, contract._
+_TBD: contract._
 
 ## Contract and enclave measurement
 
@@ -102,9 +123,12 @@ _Kept up to date as the build goes._
 | --- | --- | --- |
 | [Synthea](https://github.com/synthetichealth/synthea) v4.0.0 | Generates the synthetic patients. Downloaded at build time by `scripts/generate_data.sh`, not vendored | Apache 2.0 |
 | [DuckDB](https://duckdb.org/) (Python package) | Analytic tables and queries | MIT |
-| [pydantic](https://docs.pydantic.dev/) | Checks the shape of incoming QuerySpecs; FastAPI uses it too (Day 4) | MIT |
+| [pydantic](https://docs.pydantic.dev/) | Checks the shape of incoming QuerySpecs and requests | MIT |
+| [FastAPI](https://fastapi.tiangolo.com/) and [Starlette](https://starlette.dev/) | The engine's HTTP service and its docs page | MIT, BSD-3-Clause |
+| [Uvicorn](https://uvicorn.dev/) | Runs the HTTP service | BSD-3-Clause |
+| [httpx2](https://github.com/pydantic/httpx2) (tests only) | FastAPI's test client needs it | BSD-3-Clause |
 | [pytest](https://pytest.org/) | Tests | MIT |
-| Python standard library | Everything else in the engine | PSF |
+| Python standard library | Everything else in the engine, including SQLite for the budget ledger | PSF |
 | Claude (Anthropic), via Claude Code | AI assistance: project brief, planning, and docs | n/a |
 
 ## Known limits and what's next
@@ -115,6 +139,7 @@ _Kept up to date as the build goes._
 - Depression and heart failure are rare in Synthea's living population (well under 1% of patients), so most questions about them will be suppressed as small cells.
 - Error bars cover the noise only, not sampling error. For rates and means they use a standard approximation; the tests check they hold the true value about 95% of the time.
 - `readmit_30d` near the end of the data (after Oct 1, 2026) can miss readmissions that happen after the data ends.
+- Until the contract arrives (Day 5), the buyer in `/query` is a name the caller types, so the rate limit is per name. On-chain requests will tie it to a paying NEAR account.
 
 ## License
 
