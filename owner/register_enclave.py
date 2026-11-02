@@ -21,6 +21,9 @@ import os
 import shlex
 import subprocess
 import urllib.request
+from pathlib import Path
+
+from engine.blindfold import attest
 
 
 def run(cmd: list[str], dry_run: bool) -> None:
@@ -45,6 +48,12 @@ def main() -> None:
     with urllib.request.urlopen(a.engine.rstrip("/") + "/attestation", timeout=30) as r:
         att = json.loads(r.read())
     print(f"enclave mode {att['mode']}, account {att['account_id']}")
+    compose = (Path(__file__).resolve().parents[1] / "docker-compose.tee.yml").read_text()
+    results = attest.check(att, compose)
+    for ok, text in results:
+        print({True: "✓", None: "!", False: "✗"}[ok], text)
+    if any(ok is False for ok, _ in results):
+        raise SystemExit("the attestation failed: not registering this enclave")
     if att["mode"] != "tdx":
         print("warning: not a real TEE. Fine for testnet; the receipts will say so.")
 

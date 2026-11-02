@@ -8,6 +8,7 @@
     GET  /receipt/{id}    the receipt of an earlier request
     GET  /attestation     the enclave's public keys, report_data and quote
     GET  /info            mode, app id, compose hash, contract
+    POST /bundle          load the encrypted bundle from BUNDLE_URL now (if it failed at startup)
 
 Two ways to run:
 - local (CONTRACT_ID blank): POST {"buyer": "alice.testnet", "spec": {...}}.
@@ -43,7 +44,7 @@ from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import enclave as enclave_mod
-from . import load, receipts
+from . import bundle, load, receipts
 from .budget import State
 from .chain import Chain, from_millionths
 from .compile import compile_spec, run
@@ -68,10 +69,10 @@ class EngineError(Exception):
 class Blindfold:
     """The query pipeline, without HTTP, so tests can call it directly."""
 
-    def __init__(self, db_path: Path, schema_path: Path, state_path: Path | str, epsilon_total: float,
+    def __init__(self, db_path: Path | None, schema_path: Path, state_path: Path | str, epsilon_total: float,
                  clock: Callable[[], float] = time.time, enclave: Enclave | None = None,
-                 chain: Chain | None = None):
-        if not Path(db_path).exists():
+                 chain: Chain | None = None, bundle_url: str | None = None, bundle_hash: str | None = None):
+        if not bundle_url and not Path(db_path).exists():
             raise SystemExit(f"{db_path} not found: run `make data` first")
         self.schema_bytes = Path(schema_path).read_bytes()
         self.schema = json.loads(self.schema_bytes)
@@ -87,10 +88,41 @@ class Blindfold:
                 raise SystemExit(f"schema.json hashes to {self.schema_hash}, but {chain.contract_id} "
                                  f"lists {self.dataset} with {d['schema_hash']}")
             self.total = from_millionths(d["epsilon_total"])
-        self.con = duckdb.connect(str(db_path), read_only=True)
         self.state = State(state_path)
         self.clock = clock
         self.lock = threading.Lock()  # one query at a time: check, charge, cache and settle together
+        self.bundle_url, self.bundle_hash = bundle_url, bundle_hash
+        self.con: duckdb.DuckDBPyConnection | None = None
+        self.data = {"source": None, "bundle_url": bundle_url, "bundle_hash": None, "error": None}
+        if bundle_url:
+            try:
+                self.load_bundle()
+            except EngineError as e:  # start anyway: /attestation must work before the bundle exists
+                print(f"no data yet: {e.detail}", flush=True)
+        else:
+            self.con = duckdb.connect(str(db_path), read_only=True)
+            self.data["source"] = "file"
+
+    def load_bundle(self) -> dict:
+        """Fetch, check, decrypt and load the bundle from BUNDLE_URL. Safe for anyone to
+        trigger: the URL is fixed, and the hash must match the owner's on-chain listing."""
+        if not self.bundle_url:
+            raise EngineError(409, "this engine reads a local file, not a bundle")
+        expected = self.chain.dataset(self.dataset)["bundle_hash"] if self.chain else self.bundle_hash
+        if self.con is not None:
+            if expected == self.data["bundle_hash"]:
+                return self.data
+            raise EngineError(409, "a different bundle is already loaded: restart the engine to change data")
+        try:
+            if not expected:
+                raise bundle.BundleError("no bundle hash listed yet (update_dataset, or BUNDLE_HASH locally)")
+            self.con = bundle.open_bundle(bundle.fetch(self.bundle_url), expected, self.enclave.box_key,
+                                          self.dataset, self.schema_hash)
+        except (bundle.BundleError, OSError) as e:
+            self.data["error"] = str(e)
+            raise EngineError(503, f"bundle not loaded: {e}") from e
+        self.data.update(source="bundle", bundle_hash=expected, error=None)
+        return self.data
 
     @classmethod
     def from_env(cls) -> Blindfold:
@@ -100,6 +132,8 @@ class Blindfold:
         chain = Chain.from_env(enclave)
         default_state = DATA_DIR / (f"state-{chain.contract_id}.sqlite" if chain else "state.sqlite")
         return cls(
+            bundle_url=os.environ.get("BUNDLE_URL") or None,
+            bundle_hash=os.environ.get("BUNDLE_HASH") or None,
             db_path=Path(os.environ.get("BLINDFOLD_DB", load.DEFAULT_DB)),
             schema_path=schema_path,
             state_path=Path(os.environ.get("BLINDFOLD_STATE", default_state)),
@@ -109,7 +143,8 @@ class Blindfold:
         )
 
     def close(self) -> None:
-        self.con.close()
+        if self.con is not None:
+            self.con.close()
         self.state.close()
 
     def spent(self) -> Fraction:
@@ -144,10 +179,13 @@ class Blindfold:
             "dataset": self.dataset,
             "schema_hash": self.schema_hash,
             "contract_id": self.chain.contract_id if self.chain else None,
+            "data": self.data,
         }
 
     def query(self, buyer: str | None, raw: Any, request_id: int | None = None) -> dict:
         with self.lock:
+            if self.con is None:
+                raise EngineError(503, f"no data loaded yet: {self.data['error']}. POST /bundle to retry")
             if not self.chain:
                 if buyer is None:
                     raise EngineError(422, "local mode: send a buyer name")
@@ -286,5 +324,13 @@ def create_app(engine: Blindfold | None = None) -> FastAPI:
     @app.get("/info")
     def get_info() -> dict:
         return engine.info()
+    
+    @app.post("/bundle")
+    def post_bundle() -> dict:
+        try:
+            with engine.lock:
+                return engine.load_bundle()
+        except EngineError as e:
+            raise HTTPException(status_code=e.status, detail=e.detail) from e
 
     return app

@@ -12,8 +12,9 @@ CONTRACT_ID ?=
 OWNER ?=
 ADMIN ?=
 REQUEST ?=
+ALLOW_SIM ?=
 
-.PHONY: help data test sql ask serve query reset contract register up register-enclave pay verify demo bench deploy
+.PHONY: help data test sql ask serve query reset contract register up register-enclave pay verify demo bench deploy bundle
 
 help:
 	@echo "make data    generate 10,000 Synthea patients and build the 5 analytic tables"
@@ -32,6 +33,7 @@ help:
 	@echo "make demo    start local mode (not built yet)"
 	@echo "make bench   accuracy vs epsilon benchmark (not built yet)"
 	@echo "make deploy  deploy contract and enclave (not built yet)"
+	@echo "make bundle  check the enclave, then encrypt the tables to its key (URL=... CONTRACT_ID=... OWNER=...)"
 
 data:
 	bash scripts/generate_data.sh
@@ -68,6 +70,9 @@ up:
 
 register-enclave:
 	$(PYTHON) owner/register_enclave.py --contract $(CONTRACT_ID) --admin $(ADMIN) --engine $(URL) --network $(NEAR_NETWORK)
+
+bundle:
+	$(PYTHON) owner/encrypt.py --engine $(URL) $(if $(CONTRACT_ID),--contract $(CONTRACT_ID)) $(if $(OWNER),--owner $(OWNER)) --network $(NEAR_NETWORK) $(if $(ALLOW_SIM),--allow-simulated)
 
 pay:
 	$(PYTHON) agent/pay_and_ask.py --contract $(CONTRACT_ID) --buyer $(BUYER) --spec $(SPEC) --engine $(URL) --network $(NEAR_NETWORK)

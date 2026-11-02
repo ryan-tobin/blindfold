@@ -31,6 +31,8 @@ services:
       CONTRACT_ID: ${CONTRACT_ID:-}
       NEAR_NETWORK: ${NEAR_NETWORK:-testnet}
       NEAR_RPC_URL: ${NEAR_RPC_URL:-}
+      BUNDLE_URL: ${BUNDLE_URL:-}
+      BUNDLE_HASH: ${BUNDLE_HASH:-}
     volumes:
       - dstack-sock:/var/run/dstack
       - ./data:/app/data

@@ -78,6 +78,7 @@ class Enclave:
     app_id: str | None = None
     instance_id: str | None = None
     quote: dict | None = None  # the GetQuote reply: quote, event_log, vm_config
+    tcb_info: dict | None = None  # from Info: app_compose, measurements, os_image_hash
 
     @property
     def signer_pubkey(self) -> str:
@@ -111,6 +112,8 @@ class Enclave:
             "quote_hash": hashlib.sha256(bytes.fromhex(quote)).hexdigest() if quote else None,
             "event_log": q.get("event_log"),
             "vm_config": q.get("vm_config"),
+            "app_compose": (self.tcb_info or {}).get("app_compose"),
+            "os_image_hash": (self.tcb_info or {}).get("os_image_hash"),
         }
 
 
@@ -129,6 +132,8 @@ def from_dstack(endpoint: str, mode: str, schema_hash: str) -> Enclave:
     e = Enclave(mode, SigningKey(key(SIGNER_PATH)), PrivateKey(key(DATA_PATH)), schema_hash)
     info = dstack_call(endpoint, "Info", {})
     e.compose_hash, e.app_id, e.instance_id = info.get("compose_hash"), info.get("app_id"), info.get("instance_id")
+    tcb = info.get("tcb_info") or {}
+    e.tcb_info = json.loads(tcb) if isinstance(tcb, str) else tcb  # dstack sends it as a JSON string
     e.quote = dstack_call(endpoint, "GetQuote", {"report_data": e.report_data().hex()})
     return e
 

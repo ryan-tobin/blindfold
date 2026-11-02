@@ -1,0 +1,22 @@
+# The engine in a real Intel TDX enclave on Phala Cloud.
+# This whole file is measured into the enclave's quote (its compose hash), so
+# the image is pinned by digest and there are no secrets or env vars to set:
+# anyone can check that the enclave runs exactly this. The data arrives
+# encrypted from BUNDLE_URL and must match the hash listed on CONTRACT_ID.
+services:
+  engine:
+    image: ghcr.io/ryan-tobin/blindfold-engine@sha256:REPLACE_WITH_DIGEST
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    shm_size: 256mb
+    environment:
+      CONTRACT_ID: blindfold.ryan-tobin.testnet
+      NEAR_NETWORK: testnet
+      BUNDLE_URL: https://github.com/ryan-tobin/blindfold/releases/download/riverside-v1/riverside.bundle
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - state:/app/data
+
+volumes:
+  state:

@@ -6,36 +6,38 @@
 Checks, in order:
 1. the receipt hash, recomputed from the receipt
 2. the ed25519 signature, with the signer key named in the receipt
-3. that key is the enclave's: the engine's /attestation and, with a contract,
-   the enclave registered on-chain
-4. the attestation binds the keys and the schema: report_data = sha256(signer
-   + encryption key + schema hash), and the quote carries that report_data
-5. with a contract: the request was settled with this exact receipt hash
+3. that key is the engine's enclave key (its /attestation)
+4. the attestation (engine/blindfold/attest.py): report_data binds the keys
+   and the schema; for a real TDX enclave, the quote is signed by Intel, the
+   event log replays to RTMR3, and the compose hash in it is our
+   docker-compose.tee.yml
+5. with a contract: the signer, compose hash and quote are the registered
+   enclave's, the dataset's bundle is the one the engine loaded, and the
+   request was settled with this exact receipt hash
 
 A simulated or dev enclave passes in yellow, never green: its quote proves
-nothing. Checking a real quote against Intel's certificates arrives on Day 7.
-Exits 1 if any check fails.
+nothing. Exits 1 if any check fails.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
 import urllib.request
+from pathlib import Path
 
-from blindfold import receipts
-from blindfold.near import RPC_URLS, Near, b58decode
+from blindfold import attest, receipts
+from blindfold.near import RPC_URLS, Near
 
 GREEN, YELLOW, RED, END = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
-QUOTE_REPORT_DATA = 568  # TDX v4 quote: 48-byte header, report_data at byte 520 of the body
+TEE_COMPOSE = Path(__file__).resolve().parents[1] / "docker-compose.tee.yml"
 failed = False
 
 
 def check(ok: bool | None, text: str) -> None:
-    """ok True = pass, None = pass but simulated, False = fail."""
+    """ok True = pass, None = pass with a warning, False = fail."""
     global failed
     mark = {True: f"{GREEN}✓", None: f"{YELLOW}!", False: f"{RED}✗"}[ok]
     print(f"{mark} {text}{END}")
@@ -43,7 +45,8 @@ def check(ok: bool | None, text: str) -> None:
 
 
 def get_json(url: str):
-    with urllib.request.urlopen(url, timeout=30) as r:
+    req = urllib.request.Request(url, headers={"User-Agent": "blindfold-verify"})
+    with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read())
 
 
@@ -54,6 +57,8 @@ def main() -> None:
     p.add_argument("--request", type=int, help="fetch this request's receipt from the engine")
     p.add_argument("--contract", default=os.environ.get("CONTRACT_ID") or None)
     p.add_argument("--network", default=os.environ.get("NEAR_NETWORK", "testnet"))
+    p.add_argument("--compose", type=Path, default=TEE_COMPOSE, help="the compose file the enclave should run")
+    p.add_argument("--pccs", default=attest.PHALA_PCCS, help="collateral server, or https://api.trustedservices.intel.com")
     a = p.parse_args()
 
     if a.receipt:
@@ -70,18 +75,16 @@ def main() -> None:
     check(doc.get("receipt_hash", h) == h, "receipt hash matches its contents")
     check(receipts.signature_ok(r), f"signature valid for {r['signer_pubkey']}")
 
+    att = info = None
     if a.engine:
         att = get_json(f"{a.engine.rstrip('/')}/attestation")
+        info = get_json(f"{a.engine.rstrip('/')}/info")
         check(att["signer_pubkey"] == r["signer_pubkey"], "signer is the engine's enclave key")
-        signer = b58decode(att["signer_pubkey"].removeprefix("ed25519:"))
-        expected = hashlib.sha256(signer + bytes.fromhex(att["encryption_pubkey"]) + bytes.fromhex(att["schema_hash"]))
-        check(att["report_data"] == expected.hexdigest(), "report_data = sha256(signer key + encryption key + schema hash)")
-        if att["quote"]:
-            quote = bytes.fromhex(att["quote"])
-            in_quote = quote[QUOTE_REPORT_DATA:QUOTE_REPORT_DATA + 32]
-            check(in_quote == expected.digest(), "the quote carries that report_data")
-        real = att["mode"] == "tdx"
-        check(True if real else None, f"enclave mode: {att['mode']}" + ("" if real else " (not a real TEE, the quote proves nothing)"))
+        compose = a.compose.read_text() if a.compose.exists() else None
+        for ok, text in attest.check(att, compose, a.pccs):
+            check(ok, text)
+        if att["mode"] == "tdx":
+            check(r.get("compose_hash") == att["compose_hash"], "the receipt names this compose hash")
 
     if a.contract:
         chain = Near(os.environ.get("NEAR_RPC_URL") or RPC_URLS[a.network])
@@ -90,6 +93,14 @@ def main() -> None:
               f"signer is the enclave registered on {a.contract}")
         if enclave and r.get("compose_hash"):
             check(enclave["compose_hash"] == r["compose_hash"], "compose hash matches the registered one")
+        if enclave and att and att.get("quote_hash"):
+            same = enclave["quote_hash"] == att["quote_hash"]
+            check(True if same else None, "quote hash matches the registered one" if same
+                  else "the quote changed since registration (normal after a restart; keys and code are checked above)")
+        if info and info["data"]["source"] == "bundle":
+            ds = chain.view(a.contract, "get_dataset", {"id": info["dataset"]})
+            check(bool(ds) and ds["bundle_hash"] == info["data"]["bundle_hash"],
+                  f"the engine loaded the bundle listed on-chain ({info['data']['bundle_hash'][:16]}…)")
         req = chain.view(a.contract, "get_request", {"id": str(r["request_id"])})
         check(bool(req) and req["receipt_hash"] == h and req["status"] == r["status"],
               f"request {r['request_id']} settled on-chain with this receipt hash")
