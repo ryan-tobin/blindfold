@@ -42,7 +42,7 @@ Built .../data/riverside.duckdb
   labs            325,355 rows
 ```
 
-`make test` then prints `186 passed` for the engine, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `166 passed, 20 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
+`make test` then prints `205 passed` for the engine, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `184 passed, 21 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
 
 The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65plus_by_sex.json`: of diabetic patients aged 65+ with an inpatient stay, what share were readmitted within 30 days, by sex? It counts each patient once, at ε 1.0.
 
@@ -59,7 +59,7 @@ The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65pl
 
 To see a refusal instead, run `make sql SPEC=datasets/riverside/examples/attack_one_patient.json`: it prints the refusal as JSON and exits with code 2.
 
-`make serve` starts the engine as a web service. Open http://127.0.0.1:8000/docs for the interactive API docs. It has six endpoints:
+`make serve` starts the engine as a web service. Open http://127.0.0.1:8000/docs for the interactive API docs. It has seven endpoints:
 
 | Endpoint | What it does |
 | --- | --- |
@@ -68,7 +68,8 @@ To see a refusal instead, run `make sql SPEC=datasets/riverside/examples/attack_
 | `POST /query` | `{"buyer": "alice.testnet", "spec": {...}}` (or `{"request_id": 7, ...}` in chain mode): a noisy answer or a refusal, always with a signed receipt |
 | `GET /receipt/{id}` | The receipt of an earlier request |
 | `GET /attestation` | The enclave's mode, public keys, report_data and quote |
-| `GET /info` | Mode, app id, compose hash, NEAR account and contract |
+| `GET /info` | Mode, app id, compose hash, NEAR account, contract, and where the data came from |
+| `POST /bundle` | Load the encrypted bundle from `BUNDLE_URL` now (if it wasn't ready at startup) |
 
 With the service running, `make query` (in a second terminal) sends the demo question as `alice.testnet` and prints the answer and its receipt. The receipt shows `"epsilon_charged": 1.0` and `"epsilon_remaining": 9.0`. Run `make query` again and you get the exact same numbers back, with `"replay_of": 1` and `"epsilon_charged": 0.0`: a repeated question costs nothing and can't be averaged. `make query SPEC=datasets/riverside/examples/attack_one_patient.json` is refused (`too_fine`) and costs nothing. Every receipt is signed by the enclave's ed25519 key. `make verify REQUEST=1` checks it: the receipt hash, the signature, that the key is the engine's, and that the attestation binds the keys to the schema. Without Docker the engine runs in **dev** mode (a local key in `data/dev_enclave.key`, no quote), and the verifier marks it in yellow.
 
@@ -76,7 +77,7 @@ The budget, the replay cache and the receipts live in `data/state.sqlite`, so th
 
 ### The enclave and the chain
 
-`make up` runs the engine next to Phala's dstack simulator, which gives it the same API as a real Intel TDX enclave. The engine derives two keys from dstack (`engine/blindfold/enclave.py`): an ed25519 **signer** that signs every receipt and is also the enclave's own NEAR account (the implicit account named by its public key), and an X25519 **encryption** key the data owner encrypts the bundle to (Day 7). It puts `sha256(signer key + encryption key + schema hash)` into the attestation quote's report_data, so the quote binds both keys and the schema to the code. In the simulator the quote is a fixed sample, so `/attestation` says `"simulated": true` and the verifier shows it in yellow.
+`make up` runs the engine next to Phala's dstack simulator, which gives it the same API as a real Intel TDX enclave. The engine derives two keys from dstack (`engine/blindfold/enclave.py`): an ed25519 **signer** that signs every receipt and is also the enclave's own NEAR account (the implicit account named by its public key), and an X25519 **encryption** key the data owner encrypts the bundle to. It puts `sha256(signer key + encryption key + schema hash)` into the attestation quote's report_data, so the quote binds both keys and the schema to the code. In the simulator the quote is a fixed sample, so `/attestation` says `"simulated": true` and the verifier shows it in yellow.
 
 With `CONTRACT_ID` set (in `.env` for Docker, or `make serve CONTRACT_ID=...`), the engine runs in **chain mode**:
 
@@ -87,6 +88,22 @@ With `CONTRACT_ID` set (in `.env` for Docker, or `make serve CONTRACT_ID=...`), 
 The engine reads `epsilon_total` and `epsilon_spent` from the contract and uses the larger of the contract's and its own ledger, so neither a restart nor a lost transaction can overspend. If `settle` fails, the engine keeps the answer and returns an error; sending the same request id again settles it without charging ε twice.
 
 `make register-enclave CONTRACT_ID=... ADMIN=...` funds the enclave's account with 1 NEAR for gas and registers it on the contract. `make pay CONTRACT_ID=... BUYER=...` pays for the demo question on-chain and asks the engine (the buyer's key comes from near-cli's legacy keychain). `make verify REQUEST=<id> CONTRACT_ID=...` then also checks that the enclave is the registered one and that the request was settled with this exact receipt hash.
+
+### The encrypted bundle and the real enclave
+
+The data reaches the enclave only as an encrypted **bundle** (`engine/blindfold/bundle.py`). `make bundle URL=<engine>` first checks the enclave's attestation (`engine/blindfold/attest.py`), then packs the five tables as Parquet in one archive and seals it to the enclave's X25519 key, writing `data/riverside.bundle`. With `CONTRACT_ID` and `OWNER` it also lists the bundle's SHA-256 on the contract (`update_dataset`). The ciphertext is safe to publish: only the enclave can open it.
+
+The engine fetches the bundle from `BUNDLE_URL`, refuses it unless its SHA-256 is the one listed on-chain (or `BUNDLE_HASH` without a contract), decrypts it in memory, and loads it into an in-memory DuckDB. The Parquet files sit in RAM (tmpfs) only while DuckDB reads them, then DuckDB's file access is switched off for good. Until a bundle loads, the engine still serves `/attestation` (the owner needs its key first) and `/query` answers 503; `POST /bundle` retries.
+
+To try it locally with the simulator: `make up`, then `make bundle URL=http://127.0.0.1:8000 ALLOW_SIM=1`, then restart with `BUNDLE_URL=/app/data/riverside.bundle BUNDLE_HASH=<the printed hash> docker compose up`.
+
+The real enclave runs on Phala Cloud in an Intel TDX VM, from `docker-compose.tee.yml`. That file is measured into the quote, so it pins the engine image by digest, names the contract and the bundle URL, and takes no env vars or secrets. The image is built by GitHub Actions (`.github/workflows/engine-image.yml`) with a signed build provenance, so anyone can check it came from this repo:
+
+```bash
+gh attestation verify oci://ghcr.io/ryan-tobin/blindfold-engine@sha256:535238f4cd8da65ae5125846e457e099725f33e2a291b5763b8803fe19301d1a --repo ryan-tobin/blindfold
+```
+
+Pointed at the real enclave, `make verify` checks the whole chain: the quote is signed by a genuine Intel TDX CPU (dcap-qvl, up to Intel's root CA, with Phala's PCCS for revocation lists and TCB status), report_data binds the keys and schema, the event log replays to the quote's RTMR0-3 (dstack 0.5.12 leaves the RTMR3 digests empty, so the verifier computes each one from its event), its compose hash is `sha256(app_compose)`, and app_compose holds this repo's `docker-compose.tee.yml` byte for byte. The OS image hash is in the quote too; the image itself is dstack's, which Phala's key service checks before releasing keys, and the verifier doesn't rebuild it.
 
 _TBD: expected output for each demo step._
 
@@ -128,11 +145,13 @@ _TBD: table from `make bench`._
 - `engine/tests/test_app.py` (16): the HTTP service end to end: answers with receipts, free identical replays, the averaging attack, a refusal for each rule, the budget running out, the rate limit, a restart, and the demo question on the real tables.
 - `engine/tests/test_enclave.py` (14): keys from a fake dstack agent over a unix socket and HTTP, report_data in the quote, dev-mode keys, and signed receipts that break when any field changes.
 - `engine/tests/test_chain.py` (15): chain mode against a fake contract: paid questions settle, replays cost no ε, mismatched or bad specs are refused and refunded, a request is answered once, a failed settle retries for free, the budget follows the contract, plus NEAR transaction bytes checked against py-near and base58.
+- `engine/tests/test_bundle.py` (10): bundle round trip with every row and type intact, no file access after loading, fresh ciphertext that reveals nothing, the wrong hash, key, schema or archive entries refused, an engine that starts without data and loads the bundle later, chain mode loading only the listed bundle, and the real tables.
+- `engine/tests/test_attest.py` (9): a made-up TDX quote and event log: every check passes, dstack's digest formula, digests computed when dstack leaves them empty, a forged event log, a different compose file, keys not in the quote, operator env vars, and simulated or dev enclaves shown as warnings.
 - `contract/src/tests.rs` (19): answered questions pay the owner and spend ε; refusals refund and cost nothing; a free replay; only the enclave settles, once, and never for more ε than requested; per-question and daily caps and the daily reset; an agent key can't raise its caps; pending questions reserve the budget; closed datasets; owner-only updates; expiry refunds; USDC-only deposits; unique dataset ids; the recent-queries feed.
 
 ## Contract and enclave measurement
 
-Contract on NEAR testnet: [`blindfold.ryan-tobin.testnet`](https://testnet.nearblocks.io/address/blindfold.ryan-tobin.testnet). Build it with `make contract`; cargo-near prints the wasm's SHA-256. The enclave registered there today is the simulated one (Day 6); the real TDX enclave replaces it on Day 7.
+Contract on NEAR testnet: [`blindfold.ryan-tobin.testnet`](https://testnet.nearblocks.io/address/blindfold.ryan-tobin.testnet). Build it with `make contract`; cargo-near prints the wasm's SHA-256. The enclave registered there is the real TDX enclave on Phala Cloud (see below).
 
 | Method | Who calls it | What it does |
 | --- | --- | --- |
@@ -150,7 +169,19 @@ Contract on NEAR testnet: [`blindfold.ryan-tobin.testnet`](https://testnet.nearb
 
 Units: amounts are USDC's smallest unit (6 decimals, so $0.25 = `"250000"`) and ε is in millionths (1.0 = `1000000`), so the budget adds up exactly. Every change emits a NEP-297 event (`EVENT_JSON:{"standard":"blindfold",...}`).
 
-Enclave code hash: _TBD (Day 7)._
+The enclave, on Phala Cloud (Intel TDX, dstack 0.5.12, production OS image):
+
+| | |
+| --- | --- |
+| URL | `https://87eb46e50a2a931b1f84dfeff6cb89bf77e9cff0-8000.dstack-pha-prod5.phala.network` (started for demos) |
+| App id | `87eb46e50a2a931b1f84dfeff6cb89bf77e9cff0` |
+| Compose hash (registered on-chain) | `b6f5b25920c06978d9b55824c0045993705aa95f94f1ab24b95caaee400cb583` |
+| Engine image | `ghcr.io/ryan-tobin/blindfold-engine@sha256:535238f4cd8da65ae5125846e457e099725f33e2a291b5763b8803fe19301d1a` |
+| Enclave NEAR account | `b654d7e23d33e9bcc3096295ee4c85877f9e6c6dfc5b0f02960dd263dba91146` |
+| Signer key | `ed25519:DGkEji4hQLxUYbDCYKFA5RwMJ8wfAjWKaREnwX6TpbuX` |
+| Encrypted bundle | [`riverside-v1`](https://github.com/ryan-tobin/blindfold/releases/tag/riverside-v1), SHA-256 `f67024c6e0678a34f02b1b0bc99ff9d796169ba9fc343fd3dfab211211b039ce` |
+
+Check it yourself while it's running: `make verify REQUEST=2 CONTRACT_ID=blindfold.ryan-tobin.testnet URL=<the URL above>`. Request 2 was answered inside the enclave and settled in [this transaction](https://testnet.nearblocks.io/txns/8B2Aape5LfR7dQ3Gih3Wj76zDehCxPGVpJ3bDdqqBxbA); all 20 checks pass.
 
 ## Built during the hackathon
 
@@ -170,6 +201,9 @@ _Kept up to date as the build goes._
 | [httpx2](https://github.com/pydantic/httpx2) (tests only) | FastAPI's test client needs it | BSD-3-Clause |
 | [PyNaCl](https://github.com/pyca/pynacl) 1.6.2 | ed25519 receipt and transaction signatures, X25519 keys | Apache 2.0 |
 | [dstack](https://github.com/Dstack-TEE/dstack) v0.6.1 simulator | The simulated enclave. Built from source by `docker/simulator/Dockerfile`, adapted from dstack's own simulator Dockerfile | Apache 2.0 |
+| [dcap-qvl](https://github.com/Phala-Network/dcap-qvl) 0.7.0 | Checks Intel TDX quotes up to Intel's root CA (`engine/blindfold/attest.py`, dev and verify only) | Apache 2.0 |
+| [Phala Cloud](https://phala.com/) with dstack 0.5.12 | Runs the real enclave: the TDX VM, its OS image and its key service (KMS) | service; dstack is Apache 2.0 |
+| GitHub Actions (`actions/checkout`, `docker/*-action`, `actions/attest-build-provenance`) | Builds and signs the engine image | MIT or Apache 2.0 |
 | [pytest](https://pytest.org/) | Tests | MIT |
 | [near-sdk-rs](https://github.com/near/near-sdk-rs) 5.29.1 | The NEAR contract | MIT or Apache 2.0 |
 | [cargo-near](https://github.com/near/cargo-near) 0.22.0 | Builds the contract; project layout from `cargo near new` | MIT or Apache 2.0 |
@@ -185,9 +219,11 @@ _Kept up to date as the build goes._
 - Depression and heart failure are rare in Synthea's living population (well under 1% of patients), so most questions about them will be suppressed as small cells.
 - Error bars cover the noise only, not sampling error. For rates and means they use a standard approximation; the tests check they hold the true value about 95% of the time.
 - `readmit_30d` near the end of the data (after Oct 1, 2026) can miss readmissions that happen after the data ends.
-- The simulated enclave's keys come from the simulator's public sample key file, so anyone can derive them. A simulated enclave registered on testnet proves nothing; the real TDX deployment (Day 7) replaces it.
+- The simulated enclave's keys come from the simulator's public sample key file, so anyone can derive them, so it only ever runs locally.
+- Phala's key service (KMS) derives the enclave's keys from its app id. Redeploying the same app keeps them; a new app gets new keys, and the owner re-encrypts the bundle (`make bundle`).
 - Without `CONTRACT_ID` the engine runs in local mode: the buyer in `/query` is a name the caller types and nobody pays. Buyers pay with USDC from Day 9; until then `make pay` works on a dataset whose price is 0.
 - Trust model: the contract doesn't check the Intel TDX quote itself, which is too heavy for a contract. It trusts one registered enclave account, whose key exists only inside the enclave, and stores the quote hash so anyone can check it off-chain.
+- Trust in Phala: the enclave's keys come from Phala's key service (KMS), which only releases them to a VM whose quote and compose hash it accepts, and the OS image is dstack's. The verifier checks the OS image hash is in the quote but doesn't rebuild the image. A KMS run on-chain (dstack supports one on Base) would remove that trust.
 - The contract account pays NEAR storage for every question it records (a few hundred bytes each).
 
 ## License
