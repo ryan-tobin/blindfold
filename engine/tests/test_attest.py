@@ -32,9 +32,9 @@ def make_att() -> dict:
     events = [event("system-preparing", b""), event("app-id", bytes.fromhex("11" * 20)),
               event("compose-hash", bytes.fromhex(COMPOSE_HASH)), event("key-provider", b'{"name":"kms"}'),
               {"imr": 0, "event_type": 1, "event": "", "event_payload": "", "digest": "ff" * 48}]
-    rtmr3 = attest.replay([x["digest"] for x in events if x["imr"] == 3])
     body = bytearray(584)
-    body[472:520] = rtmr3
+    for i in range(4):
+        body[328 + 48 * i:376 + 48 * i] = attest.replay([x["digest"] for x in events if x["imr"] == i])
     body[520:584] = e.report_data().ljust(64, b"\0")
     quote = b"\x04\x00\x02\x00" + bytes(44) + bytes(body) + bytes(64)
     return {**e.attestation(), "mode": "tdx", "simulated": False, "quote": quote.hex(), "app_id": "11" * 20,
@@ -71,7 +71,7 @@ def test_a_forged_event_log_fails():
     assert "all 4 RTMR3 events match their digests" in failures(att)
     events[2]["digest"] = attest.event_digest(events[2])  # fix the digest: RTMR3 no longer replays
     att["event_log"] = json.dumps(events)
-    assert "replaying the event log gives the quote's RTMR3" in failures(att)
+    assert "replaying the event log gives the quote's RTMR0-3" in failures(att)
 
 
 def test_other_code_fails():
@@ -96,6 +96,17 @@ def test_simulated_and_dev_are_warnings_not_passes():
     dev = enclave.dev("cd" * 32).attestation()
     assert [ok for ok, _ in attest.check(dev)] == [True, None]
 
+def test_empty_digests_are_computed_from_the_events():
+    att = make_att()  # dstack 0.5.12 sends RTMR3 events without digests
+    events = json.loads(att["event_log"])
+    for x in events:
+        if x["imr"] == 3:
+            x["digest"] = ""
+    att["event_log"] = json.dumps(events)
+    assert failures(att) == []
+    events[2]["event_payload"] = "00" * 32  # a forged compose hash no longer replays
+    att["event_log"] = json.dumps(events)
+    assert "replaying the event log gives the quote's RTMR0-3" in failures(att)
 
 def test_operator_env_vars_are_flagged():
     att = make_att()

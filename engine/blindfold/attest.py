@@ -105,9 +105,11 @@ def check(att: dict, compose_file: str | None = None, pccs: str = PHALA_PCCS) ->
     out.append(intel_check(quote, pccs))
     events = json.loads(att["event_log"]) if isinstance(att["event_log"], str) else att["event_log"]
     rtmr3 = [e for e in events if e["imr"] == 3]
-    out.append((all(event_digest(e) == e["digest"] for e in rtmr3), f"all {len(rtmr3)} RTMR3 events match their digests"))
-    out.append((replay([e["digest"] for e in rtmr3]) == report["rt_mr3"], "replaying the event log gives the quote's RTMR3"))
-
+    # dstack 0.5.12 leaves RTMR3 digests empty: we compute each one from its event, so the payloads are what's checked
+    out.append((all(e["digest"] in ("", event_digest(e)) for e in rtmr3), f"all {len(rtmr3)} RTMR3 events match their digests"))
+    replays = [replay([(e["digest"] or event_digest(e)) if i == 3 else e["digest"] for e in events if e["imr"] == i])
+               for i in range(4)]
+    out.append((replays == [report[f"rt_mr{i}"] for i in range(4)], "replaying the event log gives the quote's RTMR0-3"))
     logged = {e["event"]: as_text(e["event_payload"]) for e in rtmr3}
     app_compose = att.get("app_compose") or ""
     composed = hashlib.sha256(app_compose.encode()).hexdigest()
@@ -129,5 +131,8 @@ def check(att: dict, compose_file: str | None = None, pccs: str = PHALA_PCCS) ->
         script = hashlib.sha256(manifest["pre_launch_script"].encode()).hexdigest()
         out.append((True, f"a pre-launch script runs too (sha256 {script[:16]}…, in app_compose)"))
     os_hash = att.get("os_image_hash") or "unknown"
-    out.append((True, f"OS image {os_hash[:16]}…, MRTD {report['mr_td'].hex()[:16]}… (checked by Phala's KMS, not rebuilt here)"))
+    if "os-image-hash" in logged:
+        out.append((logged["os-image-hash"] == os_hash, f"OS image {os_hash[:16]}… is in the quote (dstack's, checked by Phala's KMS)"))
+    else:
+        out.append((True, f"OS image {os_hash[:16]}…, MRTD {report['mr_td'].hex()[:16]}… (checked by Phala's KMS, not rebuilt here)"))
     return out

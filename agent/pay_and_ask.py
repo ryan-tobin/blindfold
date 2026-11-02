@@ -23,10 +23,10 @@ from pathlib import Path
 
 from nacl.signing import SigningKey
 
-from engine.blindfold import load, receipts
-from engine.blindfold.chain import to_millionths
-from engine.blindfold.near import RPC_URLS, Near, b58decode
-from engine.blindfold.spec import validate
+from blindfold import load, receipts
+from blindfold.chain import to_millionths
+from blindfold.near import RPC_URLS, Near, b58decode
+from blindfold.spec import validate
 
 
 def main() -> None:
