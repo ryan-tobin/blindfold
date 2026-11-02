@@ -5,7 +5,7 @@
 # encrypted from BUNDLE_URL and must match the hash listed on CONTRACT_ID.
 services:
   engine:
-    image: ghcr.io/ryan-tobin/blindfold-engine@sha256:REPLACE_WITH_DIGEST
+    image: ghcr.io/ryan-tobin/blindfold-engine@sha256:535238f4cd8da65ae5125846e457e099725f33e2a291b5763b8803fe19301d1a
     restart: unless-stopped
     ports:
       - "8000:8000"
