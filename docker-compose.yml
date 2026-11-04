@@ -33,6 +33,8 @@ services:
       NEAR_RPC_URL: ${NEAR_RPC_URL:-}
       BUNDLE_URL: ${BUNDLE_URL:-}
       BUNDLE_HASH: ${BUNDLE_HASH:-}
+      NEAR_AI_API_KEY: ${NEAR_AI_API_KEY:-}
+      NEAR_AI_MODEL: ${NEAR_AI_MODEL:-}
     volumes:
       - dstack-sock:/var/run/dstack
       - ./data:/app/data

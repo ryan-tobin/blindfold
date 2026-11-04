@@ -13,6 +13,8 @@ OWNER ?=
 ADMIN ?=
 REQUEST ?=
 ALLOW_SIM ?=
+Q?= What is the 30-day readmission rate for diabetic patients aged 65 and older, by sex?
+MODELS ?=
 
 .PHONY: help data test sql ask serve query reset contract register up register-enclave pay verify demo bench deploy bundle
 
@@ -26,6 +28,7 @@ help:
 	@echo "make reset   forget the local budget ledger, replay cache and receipts"
 	@echo "make up      run the engine in a simulated enclave with Docker (dstack simulator)"
 	@echo "make register-enclave  register the running engine's enclave (CONTRACT_ID=... ADMIN=...)"
+	@echo "make ask-question	plan Q, pay for it on-chain, get the answer (CONTRACT_ID=... BUYTER=...)"
 	@echo "make pay     pay for SPEC on-chain, then get the answer (CONTRACT_ID=... BUYER=...)"
 	@echo "make verify  check a receipt's signature, enclave and on-chain record (REQUEST=id)"
 	@echo "make contract  build the NEAR contract to contract/target/near/blindfold.wasm"
@@ -34,6 +37,8 @@ help:
 	@echo "make bench   accuracy vs epsilon benchmark (not built yet)"
 	@echo "make deploy  deploy contract and enclave (not built yet)"
 	@echo "make bundle  check the enclave, then encrypt the tables to its key (URL=... CONTRACT_ID=... OWNER=...)"
+	@echo "make plan	turn a plain-English question into a QuerySpec, free (Q=\"...\")"
+	@echo "make plan-bench	score the planner on the 25 test questions (MODELS=a,b or MODELS=stub)"
 
 data:
 	bash scripts/generate_data.sh
@@ -51,6 +56,14 @@ ask:
 
 serve:
 	cd engine && $(PYTHON) -m uvicorn blindfold.app:create_app --factory --host 127.0.0.1 --port 8000
+
+plan:
+	@curl -s -X POST $(URL)/plan -H 'content-type: application/json' \
+		-d "$$($(PYTHON) -c 'import json,sys; print(json.dumps({"question": sys.argv[1]}))' "$(Q)")" \
+		| $(PYTHON) -c 'import json,sys; d=json.load(sys.stdin); d.pop("evidence",None); print(json.dumps(d,indent=2,ensure_ascii=False))'
+
+plan-bench:
+	cd engine && $(PYTHON) -m blindfold.plan_bench $(if $(MODELS),--models "$(MODELS)")
 
 query:
 	@curl -s -X POST $(URL)/query -H 'content-type: application/json' \
@@ -73,6 +86,9 @@ register-enclave:
 
 bundle:
 	$(PYTHON) owner/encrypt.py --engine $(URL) $(if $(CONTRACT_ID),--contract $(CONTRACT_ID)) $(if $(OWNER),--owner $(OWNER)) --network $(NEAR_NETWORK) $(if $(ALLOW_SIM),--allow-simulated)
+
+ask-question:
+	$(PYTHON) agent/pay_and_ask.py --contract $(CONTRACT_ID) --buyer $(BUYER) --question "$(Q)" --engine $(URL) --network $(NEAR_NETWORK)
 
 pay:
 	$(PYTHON) agent/pay_and_ask.py --contract $(CONTRACT_ID) --buyer $(BUYER) --spec $(SPEC) --engine $(URL) --network $(NEAR_NETWORK)

@@ -4,6 +4,7 @@
 
     GET  /schema          the public schema.json, byte for byte
     GET  /budget          privacy budget: total, spent, remaining, closed
+    POST /plan            a plain-English question in, a QuerySpec in plain words, its epsilon and price out
     POST /query           a QuerySpec in, a noisy answer or a refusal out, with a signed receipt
     GET  /receipt/{id}    the receipt of an earlier request
     GET  /attestation     the enclave's public keys, report_data and quote
@@ -18,6 +19,12 @@ Two ways to run:
   request on-chain, checks the spec is the one paid for, answers, and calls
   settle with the receipt hash. The budget is the larger of the contract's
   epsilon_spent and the local ledger.
+
+Planning (POST /plan) is free and charges no budget. With NEAR_AI_API_KEY set
+the question goes to a Private TEE model on NEAR AI Cloud (planner.py); without
+it, the offline stub knows the 5 demo questions (planner_stub.py). When /query
+runs a spec that /plan produced, the receipt carries the model's signature.
+
 
 Every /query gets a signed receipt, answered or refused. The checks run in order:
 1. rate limit (rule 5): at most rate_limit_per_hour requests per buyer
@@ -35,6 +42,7 @@ import json
 import os
 import threading
 import time
+from collections import OrderedDict, deque
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
@@ -50,12 +58,14 @@ from .chain import Chain, from_millionths
 from .compile import compile_spec, run
 from .dp import answer, to_fraction
 from .enclave import Enclave
+from .planner import DEFAULT_MODEL, NearAI, PlanError, Planner
+from .planner_stub import StubPlanner
 from .refuse import OVER_BUDGET, RATE_LIMITED, SPEC_MISMATCH, Refused
 from .spec import validate
 
 DATA_DIR = load.REPO_ROOT / "data"
 HOUR = 3600
-
+KEEP_PLANS = 1000
 
 class EngineError(Exception):
     """A request the engine can't take at all (no receipt). Becomes an HTTP error."""
@@ -71,7 +81,8 @@ class Blindfold:
 
     def __init__(self, db_path: Path | None, schema_path: Path, state_path: Path | str, epsilon_total: float,
                  clock: Callable[[], float] = time.time, enclave: Enclave | None = None,
-                 chain: Chain | None = None, bundle_url: str | None = None, bundle_hash: str | None = None):
+                 chain: Chain | None = None, bundle_url: str | None = None, bundle_hash: str | None = None,
+                 planner: Planner | StubPlanner | None = None, plan_limit_per_hour: int = 120):
         if not bundle_url and not Path(db_path).exists():
             raise SystemExit(f"{db_path} not found: run `make data` first")
         self.schema_bytes = Path(schema_path).read_bytes()
@@ -89,6 +100,11 @@ class Blindfold:
                                  f"lists {self.dataset} with {d['schema_hash']}")
             self.total = from_millionths(d["epsilon_total"])
         self.state = State(state_path)
+        self.planner = planner or StubPlanner(self.schema)
+        self.plan_limit = plan_limit_per_hour
+        self.plan_times: deque[float] = deque()
+        self.plan_lock = threading.Lock()
+        self.plans: OrderedDict[str, dict] = OrderedDict()  # never the question text: only signatures
         self.clock = clock
         self.lock = threading.Lock()  # one query at a time: check, charge, cache and settle together
         self.bundle_url, self.bundle_hash = bundle_url, bundle_hash
@@ -130,6 +146,9 @@ class Blindfold:
         schema_hash = hashlib.sha256(schema_path.read_bytes()).hexdigest()
         enclave = enclave_mod.load(schema_hash, DATA_DIR / "dev_enclave.key")
         chain = Chain.from_env(enclave)
+        schema = json.loads(schema_path.read_bytes())
+        key = os.environ.get("NEAR_AI_API_KEY")
+        planner = Planner(NearAI(key, os.environ.get("NEAR_AI_MODEL") or DEFAULT_MODEL), schema) if key else None
         default_state = DATA_DIR / (f"state-{chain.contract_id}.sqlite" if chain else "state.sqlite")
         return cls(
             bundle_url=os.environ.get("BUNDLE_URL") or None,
@@ -140,6 +159,8 @@ class Blindfold:
             epsilon_total=float(os.environ.get("BLINDFOLD_EPSILON_TOTAL", "10")),
             enclave=enclave,
             chain=chain,
+            planner=planner,
+            plan_limit_per_hour=int(os.environ.get("PLAN_LIMIT_PER_HOUR", "120")),
         )
 
     def close(self) -> None:
@@ -179,8 +200,39 @@ class Blindfold:
             "dataset": self.dataset,
             "schema_hash": self.schema_hash,
             "contract_id": self.chain.contract_id if self.chain else None,
+            "planner": self.planner_name(),
             "data": self.data,
         }
+
+    def planner_name(self) -> str:
+        return f"near-ai:{self.planner.client.model}" if isinstance(self.planner, Planner) else "stub"
+
+    def plan(self, question: str) -> dict:
+        """Plain English to a QuerySpec, free. The question is never stored or logged."""
+        with self.plan_lock:
+            now = self.clock()
+            while self.plan_times and self.plan_times[0] <= now - HOUR:
+                self.plan_times.popleft()
+            if len(self.plan_times) >= self.plan_limit:
+                raise EngineError(429, f"the engine plans at most {self.plan_limit} questions an hour; try later")
+            self.plan_times.append(now)
+        try:
+            plan = self.planner.plan(question)
+        except PlanError as e:
+            raise EngineError(422, str(e)) from e
+        except OSError as e:
+            raise EngineError(502, f"couldn't reach NEAR AI Cloud: {e}") from e
+        out = plan.to_dict()
+        if plan.model_signature and out["spec_hash"]:
+            with self.plan_lock:
+                self.plans[out["spec_hash"]] = plan.model_signature
+                self.plans.move_to_end(out["spec_hash"])
+                while len(self.plans) > KEEP_PLANS:
+                    self.plans.popitem(last=False)
+        price = self.chain.dataset(self.dataset)["price"] if self.chain else None
+        out["price"] = {"amount": str(price), "usdc": int(price) / 1_000_000} if price is not None else None
+        return out
+
 
     def query(self, buyer: str | None, raw: Any, request_id: int | None = None) -> dict:
         with self.lock:
@@ -257,7 +309,8 @@ class Blindfold:
 
         def make_receipt(rid: int) -> dict:
             unsigned = receipts.build(rid, self.dataset, spec_hash, status, answer, charged, left_after,
-                                      refusal, replay_of, now, self.enclave.compose_hash)
+                                      refusal, replay_of, now, self.enclave.compose_hash,
+                                      self.plans.get(spec_hash))
             return receipts.sign(unsigned, self.enclave.signer)
 
         receipt = self.state.log(self.dataset, buyer, now, status, refusal["rule"] if refusal else None,
@@ -275,6 +328,11 @@ class Blindfold:
             "receipt": receipt,
             "receipt_hash": receipts.receipt_hash(receipt),
         }
+
+class PlanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    question: str = Field(min_length=3, max_length=500, description="A question in plain English")
 
 
 class QueryRequest(BaseModel):
@@ -302,6 +360,13 @@ def create_app(engine: Blindfold | None = None) -> FastAPI:
     @app.get("/budget")
     def get_budget() -> dict:
         return engine.budget()
+
+    @app.post("/plan")
+    def post_plan(req: PlanRequest) -> dict:
+        try:
+            return engine.plan(req.question)
+        except EngineError as e:
+            raise HTTPException(status_code=e.status, detail=e.detail) from e
 
     @app.post("/query")
     def post_query(req: QueryRequest) -> dict:

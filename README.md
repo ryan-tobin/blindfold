@@ -25,6 +25,7 @@ make ask    # answer the demo question with differential-privacy noise
 make serve  # start the engine's HTTP service on http://127.0.0.1:8000 (leave it running)
 make query  # in a second terminal: ask the running service, get the answer and a signed receipt
 make verify REQUEST=1  # check that receipt's signature and the enclave that signed it
+make plan   # turn the demo question, in plain English, into a QuerySpec (free; no key needed for the 5 demo questions)
 ```
 
 To run the engine in a simulated enclave instead, use Docker: `make up` (the first build compiles Phala's dstack simulator, 10–20 minutes), then the same `make query` and `make verify REQUEST=1`. Docker reads `CONTRACT_ID` from `.env`; leave it blank (or run `CONTRACT_ID= make up`) for this local run.
@@ -42,7 +43,7 @@ Built .../data/riverside.duckdb
   labs            325,355 rows
 ```
 
-`make test` then prints `205 passed` for the engine, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `184 passed, 21 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
+`make test` then prints `226 passed` for the engine, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `205 passed, 21 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
 
 The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65plus_by_sex.json`: of diabetic patients aged 65+ with an inpatient stay, what share were readmitted within 30 days, by sex? It counts each patient once, at ε 1.0.
 
@@ -59,12 +60,13 @@ The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65pl
 
 To see a refusal instead, run `make sql SPEC=datasets/riverside/examples/attack_one_patient.json`: it prints the refusal as JSON and exits with code 2.
 
-`make serve` starts the engine as a web service. Open http://127.0.0.1:8000/docs for the interactive API docs. It has seven endpoints:
+`make serve` starts the engine as a web service. Open http://127.0.0.1:8000/docs for the interactive API docs. It has eight endpoints:
 
 | Endpoint | What it does |
 | --- | --- |
 | `GET /schema` | The public schema: tables, columns, categories and the query rules |
 | `GET /budget` | The privacy budget: total (10), spent, remaining, and whether the dataset is closed |
+| `POST /plan` | `{"question": "..."}`: the QuerySpec it becomes, in plain words, with its ε and price, and whether the engine would refuse it. Free |
 | `POST /query` | `{"buyer": "alice.testnet", "spec": {...}}` (or `{"request_id": 7, ...}` in chain mode): a noisy answer or a refusal, always with a signed receipt |
 | `GET /receipt/{id}` | The receipt of an earlier request |
 | `GET /attestation` | The enclave's mode, public keys, report_data and quote |
@@ -105,6 +107,14 @@ gh attestation verify oci://ghcr.io/ryan-tobin/blindfold-engine@sha256:535238f4c
 
 Pointed at the real enclave, `make verify` checks the whole chain: the quote is signed by a genuine Intel TDX CPU (dcap-qvl, up to Intel's root CA, with Phala's PCCS for revocation lists and TCB status), report_data binds the keys and schema, the event log replays to the quote's RTMR0-3 (dstack 0.5.12 leaves the RTMR3 digests empty, so the verifier computes each one from its event), its compose hash is `sha256(app_compose)`, and app_compose holds this repo's `docker-compose.tee.yml` byte for byte. The OS image hash is in the quote too; the image itself is dstack's, which Phala's key service checks before releasing keys, and the verifier doesn't rebuild it.
 
+### Plain English to QuerySpec
+
+Buyers don't write QuerySpecs by hand. `POST /plan {"question": "..."}` turns a question into one, shows it in plain words with its ε and price, and says if the engine would refuse it, all before anyone pays (`engine/blindfold/planner.py`). With `NEAR_AI_API_KEY` set, the question goes from the enclave to a **Private TEE** model on NEAR AI Cloud (by default `z-ai/glm-5.3-flash`), over plain HTTPS with no SDK. The model sees only the public `schema.json`, the rules and 10 worked examples, and must reply with JSON at temperature 0. The engine's own validator checks that JSON. A malformed spec goes back to the model once with the error; after two failures the buyer is asked to rephrase. A spec the privacy rules would refuse is never sent back to be "fixed", so the model can't learn to widen a question until it passes: it comes back marked `will_refuse`.
+
+Every planning call is checked. Before it, the engine fetches NEAR AI's attestation with a fresh nonce and checks that the model's report binds the nonce and the model's signing address. After it, the engine fetches the response signature and checks it covers the SHA-256 of the exact request and response bytes and recovers to that attested address (`engine/blindfold/ethsig.py`: keccak-256 and secp256k1 recovery, written from scratch). The signature goes into the receipt as `model_signature`, and `make verify` checks it. With `NEAR_AI_API_KEY` set, the verifier also confirms that NEAR AI still attests the key and checks the model's Intel quote. So one receipt shows that both the model and the engine ran in hardware enclaves.
+
+Without a key, `/plan` falls back to an offline stub that knows exactly the 5 demo questions (`engine/blindfold/planner_stub.py`), so local mode needs no keys. `make plan-bench` scores a model on 25 questions: the 5 demo questions plus 4 rewordings of each (`datasets/riverside/planner_questions.json`). See Benchmark results.
+
 _TBD: expected output for each demo step._
 
 ## Architecture and data flow
@@ -124,6 +134,7 @@ _TBD_
 - **No averaging attack.** The same question asked again, by anyone, returns the stored noisy answer at no cost (the replay cache). Asking 1,000 times gives the same noise 1,000 times. Questions are matched on their canonical form, so rewording the JSON doesn't get fresh noise.
 - **A rate limit.** At most 30 requests per buyer in any rolling hour, refusals and repeats included.
 - **A receipt for every request.** Answered or refused, each request gets a receipt with the hash of the question, the hash of the answer, the ε charged and the ε left (`engine/blindfold/receipts.py`). Refusals cost no budget.
+- **The question stays private too.** It goes to `/plan` inside the enclave, then to a Private TEE model on NEAR AI Cloud whose attestation and response signature the engine checks. The question is never stored or logged; only the model's signature is kept, in memory, to put in the receipt (`engine/blindfold/planner.py`, `engine/blindfold/app.py`). Planning is limited to 120 calls an hour (`PLAN_LIMIT_PER_HOUR`).
 - **Payments, limits and the budget are public, on NEAR.** `contract/src/lib.rs` holds each dataset's price and privacy budget, escrows the fee for every question, and records ε spent and the receipt hash when the enclave settles. A refused question refunds the fee and is logged on-chain with its rule. Pending questions reserve their ε, so they can't overspend the budget together, and the contract won't let the enclave charge more ε than the buyer asked for.
 - **An agent can buy answers but can't drain the wallet.** The buyer deposits USDC once and sets a per-question and a daily cap. Changing caps and withdrawing need 1 yoctoNEAR attached, which a NEAR function-call key can't attach, so an agent holding only a key for `request_query` can spend within the caps and nothing else.
 - **Every receipt is signed inside the enclave.** The signer key is derived by dstack from the app's identity and never leaves the enclave. The quote binds it, the encryption key and the schema hash together, and the contract only accepts `settle` from that key's account, so a receipt hash on-chain means the enclave signed it (`engine/blindfold/enclave.py`, `engine/blindfold/receipts.py`, `verify/verify.py`).
@@ -131,7 +142,20 @@ _TBD_
 
 ## Benchmark results
 
-_TBD: table from `make bench`._
+### Planner: plain English to QuerySpec
+
+`make plan-bench` plans 25 questions (the 5 demo questions and 4 rewordings of each, `datasets/riverside/planner_questions.json`) through NEAR AI Cloud, with the attestation and signature checked on every call. A question is correct when its spec is the same canonical QuerySpec as an expected one (two questions accept two equivalent specs), or, for the 5 attack questions, when it is refused. Run on Nov 4, 2026:
+
+| Private TEE model on NEAR AI Cloud | Correct | Needed a retry | Median time |
+| --- | --- | --- | --- |
+| `z-ai/glm-5.3-flash` (default) | 25/25 | 0 | 3.0 s |
+| `deepseek-ai/DeepSeek-V4.1-Flash-1017` | 25/25 | 2 | 2.8 s |
+| `Qwen/Qwen3.6-35B-A3B-FP8` | 25/25 | 1 | 4.8 s |
+| `Qwen/Qwen3.8-27B` | dropped: over 120 s per question | | |
+
+None of the 15 attack questions (5 per model) got an answer: the model refused 9 as asking about one person, and the engine refused 6 as `too_fine`. `z-ai/glm-5.3` was not tested because its attestation didn't echo our nonce, so the engine won't use it.
+
+_TBD: accuracy vs ε from `make bench` (Day 11)._
 
 ## Tests
 
@@ -146,7 +170,9 @@ _TBD: table from `make bench`._
 - `engine/tests/test_enclave.py` (14): keys from a fake dstack agent over a unix socket and HTTP, report_data in the quote, dev-mode keys, and signed receipts that break when any field changes.
 - `engine/tests/test_chain.py` (15): chain mode against a fake contract: paid questions settle, replays cost no ε, mismatched or bad specs are refused and refunded, a request is answered once, a failed settle retries for free, the budget follows the contract, plus NEAR transaction bytes checked against py-near and base58.
 - `engine/tests/test_bundle.py` (10): bundle round trip with every row and type intact, no file access after loading, fresh ciphertext that reveals nothing, the wrong hash, key, schema or archive entries refused, an engine that starts without data and loads the bundle later, chain mode loading only the listed bundle, and the real tables.
-- `engine/tests/test_attest.py` (9): a made-up TDX quote and event log: every check passes, dstack's digest formula, digests computed when dstack leaves them empty, a forged event log, a different compose file, keys not in the quote, operator env vars, and simulated or dev enclaves shown as warnings.
+- `engine/tests/test_attest.py` (10): a made-up TDX quote and event log: every check passes, dstack's digest formula, digests computed when dstack leaves them empty, a forged event log, a different compose file, keys not in the quote, operator env vars, the NEAR AI key as the one allowed secret, and simulated or dev enclaves shown as warnings.
+- `engine/tests/test_planner.py` (16): the planner against a fake NEAR AI server that signs with a real secp256k1 key: a checked plan end to end, one retry for bad JSON, rephrase after two failures, privacy refusals never retried, model refusals, a missing nonce, the wrong signer, a signature over other bytes, a late signature, prompt examples kept apart from the test questions, the stub, `/plan`, its rate limit, and the model signature in the receipt.
+- `engine/tests/test_ethsig.py` (4): keccak-256 and Ethereum signature recovery against values from eth-account.
 - `contract/src/tests.rs` (19): answered questions pay the owner and spend ε; refusals refund and cost nothing; a free replay; only the enclave settles, once, and never for more ε than requested; per-question and daily caps and the daily reset; an agent key can't raise its caps; pending questions reserve the budget; closed datasets; owner-only updates; expiry refunds; USDC-only deposits; unique dataset ids; the recent-queries feed.
 
 ## Contract and enclave measurement
@@ -208,6 +234,7 @@ _Kept up to date as the build goes._
 | [near-sdk-rs](https://github.com/near/near-sdk-rs) 5.29.1 | The NEAR contract | MIT or Apache 2.0 |
 | [cargo-near](https://github.com/near/cargo-near) 0.22.0 | Builds the contract; project layout from `cargo near new` | MIT or Apache 2.0 |
 | [near-cli-rs](https://github.com/near/near-cli-rs) 0.30.1 | Creates accounts, deploys, and signs calls from `owner/register.py` | MIT or Apache 2.0 |
+| [NEAR AI Cloud](https://docs.near.ai/cloud/) | Private TEE model inference for `/plan`, with attestation and response signatures, called over plain HTTPS | service |
 | Python standard library | Everything else in the engine, including SQLite for the budget ledger | PSF |
 | Claude (Anthropic), via Claude Code | AI assistance: project brief, planning, and docs | n/a |
 
@@ -225,6 +252,8 @@ _Kept up to date as the build goes._
 - Trust model: the contract doesn't check the Intel TDX quote itself, which is too heavy for a contract. It trusts one registered enclave account, whose key exists only inside the enclave, and stores the quote hash so anyone can check it off-chain.
 - Trust in Phala: the enclave's keys come from Phala's key service (KMS), which only releases them to a VM whose quote and compose hash it accepts, and the OS image is dstack's. The verifier checks the OS image hash is in the quote but doesn't rebuild the image. A KMS run on-chain (dstack supports one on Base) would remove that trust.
 - The contract account pays NEAR storage for every question it records (a few hundred bytes each).
+- The planner can misread a question. That is why `/plan` shows the spec in plain words before paying, and why the engine re-checks every spec. `make plan-bench` measures how often it is right.
+- The engine checks NEAR AI's attestation nonce and signature on every call, but not the model's Intel and NVIDIA quotes (too slow per question). `make verify` checks the Intel quote with `NEAR_AI_API_KEY` set; the NVIDIA GPU evidence is passed to the buyer in `/plan`'s `evidence` but not yet checked.
 
 ## License
 

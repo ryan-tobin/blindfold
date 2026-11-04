@@ -11,9 +11,10 @@ Checks, in order:
    and the schema; for a real TDX enclave, the quote is signed by Intel, the
    event log replays to RTMR3, and the compose hash in it is our
    docker-compose.tee.yml
-5. with a contract: the signer, compose hash and quote are the registered
-   enclave's, the dataset's bundle is the one the engine loaded, and the
-   request was settled with this exact receipt hash
+5. the planner: if NEAR AI wrote the spec, its signature verifies with the
+   model's TEE key; with NEAR_AI_API_KEY set, that key is in a fresh
+   attestation from NEAR AI and its Intel quote checks out
+6. with a contract: the signer, compose hash and quote are the registered
 
 A simulated or dev enclave passes in yellow, never green: its quote proves
 nothing. Exits 1 if any check fails.
@@ -29,6 +30,7 @@ import urllib.request
 from pathlib import Path
 
 from blindfold import attest, receipts
+from blindfold.planner import NearAI, PlanError, signature_ok
 from blindfold.near import RPC_URLS, Near
 
 GREEN, YELLOW, RED, END = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
@@ -74,6 +76,26 @@ def main() -> None:
 
     check(doc.get("receipt_hash", h) == h, "receipt hash matches its contents")
     check(receipts.signature_ok(r), f"signature valid for {r['signer_pubkey']}")
+
+    ms = r.get("model_signature")
+    if not ms:
+        check(None, "no model signature: the spec came from the offline stub or from the buyer")
+    else:
+        check(signature_ok(ms["text"], ms["signature"], ms["signing_address"], ms["signing_algo"]),
+              f"the spec was planned by {ms['model']}, signed by its key {ms['signing_address']}")
+        key = os.environ.get("NEAR_AI_API_KEY")
+        if key and ms["kind"] == "provider_tee":
+            try:
+                fresh = NearAI(key, ms["model"]).attest()
+                check(fresh["signing_address"] == ms["signing_address"], "NEAR AI attests that key today (fresh nonce)")
+                quote = fresh["report"]["model_attestations"][0]["intel_quote"]
+                ok, text = attest.intel_check(bytes.fromhex(quote.removeprefix("0x")), a.pccs)
+                check(ok, f"the model's TEE: {text}")
+            except PlanError as e:
+                check(False, f"couldn't check the model's attestation: {e}")
+        else:
+            check(None, "set NEAR_AI_API_KEY to check the model's key against a fresh NEAR AI attestation")
+
 
     att = info = None
     if a.engine:

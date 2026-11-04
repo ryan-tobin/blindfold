@@ -1,7 +1,9 @@
 """Receipts: what the buyer keeps, and what the contract records.
 
 Every request gets a receipt, answered or refused, signed by the enclave's
-ed25519 key. model_signature stays null until the planner arrives (Day 8).
+ed25519 key. model_signature is NEAR AI's signature over the planning call
+that wrote this spec (planner.py), or null when the spec came from the stub
+or from the buyer directly.
 
 Hashes are SHA-256 of canonical JSON (sorted keys, no spaces, UTF-8), so
 anyone can recompute them. receipt_hash covers every field except sig, the
@@ -38,7 +40,8 @@ def spec_hash(canonical_json: str) -> str:
 
 def build(request_id: int, dataset_id: str, spec_hash: str, status: str, answer: dict | None,
           epsilon_charged: Fraction, epsilon_remaining: Fraction, refusal: dict | None,
-          replay_of: int | None, ts: float, compose_hash: str | None = None) -> dict:
+          replay_of: int | None, ts: float, compose_hash: str | None = None,
+          model_signature: dict | None = None) -> dict:
     return {
         "v": VERSION,
         "request_id": request_id,
@@ -50,7 +53,7 @@ def build(request_id: int, dataset_id: str, spec_hash: str, status: str, answer:
         "epsilon_remaining": float(epsilon_remaining),
         "refusal": refusal,
         "replay_of": replay_of,
-        "model_signature": None,
+        "model_signature": model_signature,
         "compose_hash": compose_hash,
         "signer_pubkey": None,
         "ts": dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

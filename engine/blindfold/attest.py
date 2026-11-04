@@ -32,6 +32,11 @@ GOOD = {"UpToDate"}
 WARN = {"SWHardeningNeeded", "ConfigurationNeeded", "ConfigurationAndSWHardeningNeeded", "OutOfDate",
         "OutOfDateConfigurationNeeded"}
 
+# Secrets the operator may pass in encrypted (Phala encrypts them to the enclave).
+# The NEAR AI key only picks which account pays for planning: the model URL and
+# every check on the model are in the code.
+SECRET_ENVS = {"NEAR_AI_API_KEY"}
+
 
 def td_report(quote: bytes) -> dict[str, bytes]:
     """The measurement registers and report_data, read straight from the quote bytes."""
@@ -125,8 +130,13 @@ def check(att: dict, compose_file: str | None = None, pccs: str = PHALA_PCCS) ->
         out.append((manifest.get("docker_compose_file") == compose_file,
                     "the deployed compose file is docker-compose.tee.yml from this repo"))
     envs = manifest.get("allowed_envs") or []
-    out.append((True if not envs else None, "no env vars can be injected by the operator" if not envs
-                else f"the operator can set env vars: {', '.join(envs)}"))
+    extra = sorted(set(envs) - SECRET_ENVS)
+    if not envs:
+        out.append((True, "no env vars can be injected by the operator"))
+    elif not extra:
+        out.append((True, f"the operator can set only {', '.join(envs)} (an encrypted secret; it changes no code)"))
+    else:
+        out.append((None, f"the operator can set env vars: {', '.join(extra)}"))
     if manifest.get("pre_launch_script"):
         script = hashlib.sha256(manifest["pre_launch_script"].encode()).hexdigest()
         out.append((True, f"a pre-launch script runs too (sha256 {script[:16]}…, in app_compose)"))

@@ -25,7 +25,7 @@ _ROT = [[0, 36, 3, 41, 18], [1, 44, 10, 45, 2], [62, 6, 43, 15, 61], [28, 55, 25
 _MASK = (1 << 64) - 1
 
 def _rol(x: int, n: int) -> int:
-    return ((x << n) | (x >> (64 - n))) & _MASK if n else x 
+    return ((x << n) | (x >> (64 - n))) & _MASK if n else x
 
 def _keccak_f(a: list[list[int]]) -> None:
     for rc in _RC:
@@ -43,7 +43,7 @@ def _keccak_f(a: list[list[int]]) -> None:
                 a[x][y] = b[x][y] ^ (~b[(x + 1) % 5][y] & b[(x + 2) % 5][y])
         a[0][0] ^= rc
 
-def keccack256(data: bytes) -> bytes:
+def keccak256(data: bytes) -> bytes:
     rate = 136
     padded = bytearray(data) + b"\x01" + b"\x00" * ((-len(data) - 1) % rate)
     padded[-1] |= 0x80
@@ -51,7 +51,7 @@ def keccack256(data: bytes) -> bytes:
     for off in range(0, len(padded), rate):
         block = padded[off:off + rate]
         for i in range(rate // 8):
-            a[i % 5][i // 5] ^= int.from_bytes(block[8 * i:8 * u + 8], "little")
+            a[i % 5][i // 5] ^= int.from_bytes(block[8 * i:8 * i + 8], "little")
         _keccak_f(a)
     return b"".join(a[i % 5][i // 5].to_bytes(8, "little") for i in range(4))
 
@@ -79,25 +79,25 @@ def _mul(k: int, p):
     out = None
     while k:
         if k & 1:
-            out = _add(out,p)
-        p = _add(p,p)
+            out = _add(out, p)
+        p = _add(p, p)
         k >>= 1
-    return out 
+    return out
 
 def personal_sign_hash(text: str) -> bytes:
-    """EIP-191: keccak256("\\x19Ethereum Signed Messaged:\\n" + len + message)."""
+    """EIP-191: keccak256("\\x19Ethereum Signed Message:\\n" + len + message)."""
     msg = text.encode("utf-8")
-    return keccack256(b"\x19Ethereum Signed Message:\n" + str(len(msg)).encode() + msg)
+    return keccak256(b"\x19Ethereum Signed Message:\n" + str(len(msg)).encode() + msg)
 
 def recover_address(digest: bytes, signature: bytes) -> str:
-    """The 0x address whose key made thus 65-byte (r,s,v) signature over digest."""
+    """The 0x address whose key made this 65-byte (r, s, v) signature over digest."""
     if len(signature) != 65:
         raise ValueError("an ECDSA signature is 65 bytes")
     r, s, v = int.from_bytes(signature[:32], "big"), int.from_bytes(signature[32:64], "big"), signature[64]
-    v = v - 27 if v >= 27 else v 
-    if not (0 < r < N and 0 < s < N and v in (0,1)):
+    v = v - 27 if v >= 27 else v
+    if not (0 < r < N and 0 < s < N and v in (0, 1)):
         raise ValueError("bad signature values")
-    y2 = (pow(r,3,P) + 7) % P
+    y2 = (pow(r, 3, P) + 7) % P
     y = pow(y2, (P + 1) // 4, P)
     if y * y % P != y2:
         raise ValueError("r is not on the curve")
@@ -105,11 +105,11 @@ def recover_address(digest: bytes, signature: bytes) -> str:
         y = P - y
     z = int.from_bytes(digest, "big")
     r_inv = pow(r, -1, N)
-    q =  _add(_mul(s * r_inv % N, (r, y)), _mul((-z * r_inv) % N, G))
+    q = _add(_mul(s * r_inv % N, (r, y)), _mul((-z * r_inv) % N, G))
     if q is None:
         raise ValueError("no public key")
     pub = q[0].to_bytes(32, "big") + q[1].to_bytes(32, "big")
-    return "0x" + keccack256(pub)[-20:].hex()
+    return "0x" + keccak256(pub)[-20:].hex()
 
 def recover_personal(text: str, signature_hex: str) -> str:
     """Address that personal_sign-ed text, lower case with 0x."""

@@ -81,13 +81,11 @@ def test_other_code_fails():
     att2["app_compose"] = APP_COMPOSE.replace("ab", "ef")
     assert any(t.startswith("compose hash") for t in failures(att2))
 
-
 def test_keys_not_in_the_quote_fail():
     att = make_att()
     att["encryption_pubkey"] = "00" * 32  # someone else's key
     assert failures(att) == ["report_data = sha256(signer key + encryption key + schema hash)",
                              "the quote carries that report_data"]
-
 
 def test_simulated_and_dev_are_warnings_not_passes():
     att = make_att()
@@ -115,7 +113,13 @@ def test_operator_env_vars_are_flagged():
     flagged = [(ok, t) for ok, t in attest.check(att, COMPOSE) if "env vars" in t]
     assert flagged == [(None, "the operator can set env vars: CONTRACT_ID")]
 
-
 def test_payload_as_hex_text_is_accepted():
     assert attest.as_text(b"ab12".hex()) == "ab12"
     assert attest.as_text("ab12") == "ab12"
+
+def test_the_near_ai_key_is_the_one_allowed_secret():
+    att = make_att()
+    att["app_compose"] = json.dumps({**json.loads(APP_COMPOSE), "allowed_envs": ["NEAR_AI_API_KEY"]})
+    att["compose_hash"] = hashlib.sha256(att["app_compose"].encode()).hexdigest()
+    flagged = [(ok, t) for ok, t in attest.check(att, COMPOSE) if "operator can set" in t]
+    assert flagged == [(True, "the operator can set only NEAR_AI_API_KEY (an encrypted secret; it changes no code)")]
