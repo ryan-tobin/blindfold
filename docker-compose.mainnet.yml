@@ -5,7 +5,7 @@
 # and NEAR_AI_API_KEY is the one secret, encrypted by `phala deploy -e`.
 services:
   engine:
-    image: ghcr.io/ryan-tobin/blindfold-engine@sha256:f45c13ea61c75006f249c95e37f684746c63496208f1db25e84aca84678a8f1e
+    image: ghcr.io/ryan-tobin/blindfold-engine@sha256:e908c0d71eca45be286829608ba987ac11e3bd02d877563c0d9f580b0cdfca11
     restart: unless-stopped
     ports:
       - "8000:8000"
