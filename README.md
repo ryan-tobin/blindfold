@@ -26,6 +26,7 @@ make serve  # start the engine's HTTP service on http://127.0.0.1:8000 (leave it
 make query  # in a second terminal: ask the running service, get the answer and a signed receipt
 make verify REQUEST=1  # check that receipt's signature and the enclave that signed it
 make plan   # turn the demo question, in plain English, into a QuerySpec (free; no key needed for the 5 demo questions)
+make buy BUYER=alice.testnet Q="How many patients have hypertension, by age band?"  # the buyer agent, local and unpaid
 ```
 
 To run the engine in a simulated enclave instead, use Docker: `make up` (the first build compiles Phala's dstack simulator, 10–20 minutes), then the same `make query` and `make verify REQUEST=1`. Docker reads `CONTRACT_ID` from `.env`; leave it blank (or run `CONTRACT_ID= make up`) for this local run.
@@ -43,7 +44,7 @@ Built .../data/riverside.duckdb
   labs            325,355 rows
 ```
 
-`make test` then prints `226 passed` for the engine, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `205 passed, 21 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
+`make test` then prints `226 passed` for the engine, `13 passed` for the buyer's scripts in `agent/`, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `205 passed, 21 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
 
 The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65plus_by_sex.json`: of diabetic patients aged 65+ with an inpatient stay, what share were readmitted within 30 days, by sex? It counts each patient once, at ε 1.0.
 
@@ -115,6 +116,56 @@ Every planning call is checked. Before it, the engine fetches NEAR AI's attestat
 
 Without a key, `/plan` falls back to an offline stub that knows exactly the 5 demo questions (`engine/blindfold/planner_stub.py`), so local mode needs no keys. `make plan-bench` scores a model on 25 questions: the 5 demo questions plus 4 rewordings of each (`datasets/riverside/planner_questions.json`). See Benchmark results.
 
+### Payments and the buyer agent
+
+A buyer pays in USDC (Circle's native USDC on NEAR, 6 decimals). They deposit once into the contract and set two caps, then hand their agent a key that can do one thing: call `request_query`. The scripts in `agent/` run on the buyer's machine, never in the enclave, so changing them doesn't change the enclave image.
+
+`agent/wallet.py` is the human side. Everything that signs goes through near-cli-rs with the buyer's full key from the legacy keychain (`~/.near-credentials`), prints the command first and asks before sending (`--yes` skips the question, `--dry-run` only prints):
+
+```bash
+python agent/wallet.py status       --buyer alice.ryan-tobin.testnet   # wallet, contract balance, caps, agent key (reads only)
+python agent/wallet.py register     --buyer alice.ryan-tobin.testnet   # NEP-145 storage with USDC for the contract and the buyer, 0.00125 NEAR each, once
+python agent/wallet.py deposit 2    --buyer alice.ryan-tobin.testnet   # ft_transfer_call into the contract
+python agent/wallet.py limits 0.25 1 --buyer alice.ryan-tobin.testnet  # at most 0.25 USDC a question and 1 USDC a UTC day
+python agent/wallet.py agent-key    --buyer alice.ryan-tobin.testnet   # a function-call key for request_query only
+python agent/wallet.py revoke-agent --buyer alice.ryan-tobin.testnet   # delete that key
+python agent/wallet.py withdraw 0.25 --buyer alice.ryan-tobin.testnet  # take USDC back out (buyers' change, owners' earnings)
+```
+
+`agent-key` makes an ed25519 key in `~/.blindfold/agent-keys/<network>/<account>.json` (chmod 600) and adds it to the account as a function-call key: receiver the Blindfold contract, method `request_query`, a NEAR gas allowance (0.25 NEAR by default) and no deposits. Because `set_limits` and `withdraw` need 1 yoctoNEAR attached, the agent can spend within the caps and can't touch anything else.
+
+`agent/buyer.py` (`make buy`) is the agent. It refuses to run unless its key is exactly that kind of key. For each question it:
+
+1. plans it with `POST /plan` (free) and prints the plan in plain words;
+2. checks the dataset is open, the privacy budget left, the price against both caps and the balance, the same checks the contract makes, so a payment that would fail is never sent;
+3. pays with `request_query`, signed by the agent key;
+4. gets the answer from `POST /query`, then reads the request on-chain and checks it was settled with the same receipt hash.
+
+Questions the engine would refuse are skipped and not paid for. `--goal "..."` (with `NEAR_AI_API_KEY`) asks a NEAR AI model for up to 3 questions that serve the goal; `--plan-only` plans and prices without paying. At the end it writes a report to `data/reports/` with every answer, price, transaction and receipt, and saves each receipt to `data/receipts/` for `make verify`.
+
+```bash
+make buy CONTRACT_ID=blindfold.ryan-tobin.testnet URL=<testnet enclave URL> BUYER=alice.ryan-tobin.testnet \
+    Q="What is the 30-day readmission rate for diabetic patients aged 65 and older, by sex?"
+make buy CONTRACT_ID=blindfold.ryan-tobin.testnet URL=<testnet enclave URL> BUYER=alice.ryan-tobin.testnet \
+    GOAL="Is diabetes linked to readmissions in older patients?"
+```
+
+On testnet, `alice.ryan-tobin.testnet` paid for requests 3 and 4 this way, and the agent skipped an attack question without paying. Circle's testnet faucet only accepts 64-hex implicit accounts, so the testnet USDC came to an implicit account first and was sent on with `ft_transfer`.
+
+### Funding from another chain with NEAR Intents
+
+`agent/fund.py` brings USDC from Base or Arbitrum to a NEAR mainnet account through the [NEAR Intents 1Click API](https://docs.near-intents.org/). It never holds the buyer's keys: it gets a quote with a one-time deposit address, the buyer sends USDC to it from their own wallet, and the script watches until it lands.
+
+```bash
+python agent/fund.py quote --amount 1 --to you.near --refund-to 0xYourBaseWallet        # dry quote: fees and time, nothing moves
+python agent/fund.py quote --amount 1 --to you.near --refund-to 0xYourBaseWallet --go   # real quote with a deposit address, then watch
+python agent/fund.py status 0xDepositAddress --to you.near [--tx 0xYourBaseTxHash]      # watch an earlier deposit again
+```
+
+Before quoting it checks that the account exists and is registered with the USDC contract, because a transfer to an unregistered account would fail. A real quote is saved with 1Click's signature to `data/intents/<deposit address>.json`, in case anything needs to be disputed. Set `ONECLICK_API_KEY` (a Distribution Channel key from partners.near-intents.org) to avoid 1Click's extra 0.25% fee. Intents has no testnet, so this always moves real money.
+
+Run on Nov 4, 2026: 1 USDC sent from Base landed as 0.999798 USDC in `ryan-tobin.near` about 2 minutes later ([NEAR transaction](https://nearblocks.io/txns/5YPrshVTBq2CNar6RKeWyEM85yNKYomd4e1S6VCeYtF5)). That USDC paid for the first mainnet question.
+
 _TBD: expected output for each demo step._
 
 ## Architecture and data flow
@@ -173,11 +224,22 @@ _TBD: accuracy vs ε from `make bench` (Day 11)._
 - `engine/tests/test_attest.py` (10): a made-up TDX quote and event log: every check passes, dstack's digest formula, digests computed when dstack leaves them empty, a forged event log, a different compose file, keys not in the quote, operator env vars, the NEAR AI key as the one allowed secret, and simulated or dev enclaves shown as warnings.
 - `engine/tests/test_planner.py` (16): the planner against a fake NEAR AI server that signs with a real secp256k1 key: a checked plan end to end, one retry for bad JSON, rephrase after two failures, privacy refusals never retried, model refusals, a missing nonce, the wrong signer, a signature over other bytes, a late signature, prompt examples kept apart from the test questions, the stub, `/plan`, its rate limit, and the model signature in the receipt.
 - `engine/tests/test_ethsig.py` (4): keccak-256 and Ethereum signature recovery against values from eth-account.
+- `agent/tests/test_agent.py` (13): USDC and NEAR amounts to and from text, agent keys that are refused (full access, the wrong contract, other methods, not on the account), the pre-payment checks for each cap, the balance and the budget, the 1Click quote body, and the report.
 - `contract/src/tests.rs` (19): answered questions pay the owner and spend ε; refusals refund and cost nothing; a free replay; only the enclave settles, once, and never for more ε than requested; per-question and daily caps and the daily reset; an agent key can't raise its caps; pending questions reserve the budget; closed datasets; owner-only updates; expiry refunds; USDC-only deposits; unique dataset ids; the recent-queries feed.
 
 ## Contract and enclave measurement
 
-Contract on NEAR testnet: [`blindfold.ryan-tobin.testnet`](https://testnet.nearblocks.io/address/blindfold.ryan-tobin.testnet). Build it with `make contract`; cargo-near prints the wasm's SHA-256. The enclave registered there is the real TDX enclave on Phala Cloud (see below).
+The same contract runs on two networks, each with its own TDX enclave on Phala Cloud:
+
+| | Testnet (demo fallback) | Mainnet (real USDC) |
+| --- | --- | --- |
+| Contract | [`blindfold.ryan-tobin.testnet`](https://testnet.nearblocks.io/address/blindfold.ryan-tobin.testnet) | [`blindfold.ryan-tobin.near`](https://nearblocks.io/address/blindfold.ryan-tobin.near) |
+| Code hash | `E6cjptwZoGVmyhaxjL2bJ8ScUJeNipJK5sjAYebC82Hd` | `E6cjptwZoGVmyhaxjL2bJ8ScUJeNipJK5sjAYebC82Hd` (same wasm) |
+| USDC | Circle's testnet USDC `3e2210e1…b8af` | Circle's USDC `17208628…33a1` |
+| Riverside price | 0.25 USDC | 0.05 USDC |
+| Enclave compose file | `docker-compose.tee.yml` | `docker-compose.mainnet.yml` |
+
+Build the contract with `make contract`; cargo-near prints the wasm's SHA-256. The mainnet contract was deployed in [this transaction](https://nearblocks.io/txns/8XZ2zLKNjTtJJcWPt63FSZm1J2ELZf9PZAqM9QYxgSJE), with `ryan-tobin.near` as admin and an expiry of 1000 blocks.
 
 | Method | Who calls it | What it does |
 | --- | --- | --- |
@@ -195,19 +257,33 @@ Contract on NEAR testnet: [`blindfold.ryan-tobin.testnet`](https://testnet.nearb
 
 Units: amounts are USDC's smallest unit (6 decimals, so $0.25 = `"250000"`) and ε is in millionths (1.0 = `1000000`), so the budget adds up exactly. Every change emits a NEP-297 event (`EVENT_JSON:{"standard":"blindfold",...}`).
 
-The enclave, on Phala Cloud (Intel TDX, dstack 0.5.12, production OS image):
+Both enclaves run the same engine image, on Phala Cloud (Intel TDX, dstack 0.5.12, production OS image). Both compose files pass `NEAR_AI_API_KEY` as Phala's encrypted secret, the one secret the verifier allows:
 
-| | |
-| --- | --- |
-| URL | `https://87eb46e50a2a931b1f84dfeff6cb89bf77e9cff0-8000.dstack-pha-prod5.phala.network` (started for demos) |
-| App id | `87eb46e50a2a931b1f84dfeff6cb89bf77e9cff0` |
-| Compose hash (registered on-chain) | `b6f5b25920c06978d9b55824c0045993705aa95f94f1ab24b95caaee400cb583` |
-| Engine image | `ghcr.io/ryan-tobin/blindfold-engine@sha256:535238f4cd8da65ae5125846e457e099725f33e2a291b5763b8803fe19301d1a` |
-| Enclave NEAR account | `b654d7e23d33e9bcc3096295ee4c85877f9e6c6dfc5b0f02960dd263dba91146` |
-| Signer key | `ed25519:DGkEji4hQLxUYbDCYKFA5RwMJ8wfAjWKaREnwX6TpbuX` |
-| Encrypted bundle | [`riverside-v1`](https://github.com/ryan-tobin/blindfold/releases/tag/riverside-v1), SHA-256 `f67024c6e0678a34f02b1b0bc99ff9d796169ba9fc343fd3dfab211211b039ce` |
+| | Testnet enclave | Mainnet enclave |
+| --- | --- | --- |
+| URL (started for demos) | `https://87eb46e50a2a931b1f84dfeff6cb89bf77e9cff0-8000.dstack-pha-prod5.phala.network` | `https://ad57f4701c05bfdc2fe85c8afbaf8d046499a8d5-8000.dstack-pha-prod9.phala.network` |
+| App id | `87eb46e50a2a931b1f84dfeff6cb89bf77e9cff0` | `ad57f4701c05bfdc2fe85c8afbaf8d046499a8d5` |
+| Compose hash (registered on-chain) | `2df57d50d84a502b62df1aaeff2b37c767dbdb20fa24464b89898a8970e1292a` | `a12ccebe060b529d60daf7cc2764d29e3e6d44bdeb058ea74b8142da94e34b16` |
+| Engine image | `ghcr.io/ryan-tobin/blindfold-engine@sha256:f45c13ea61c75006f249c95e37f684746c63496208f1db25e84aca84678a8f1e` | the same |
+| Enclave NEAR account | `b654d7e23d33e9bcc3096295ee4c85877f9e6c6dfc5b0f02960dd263dba91146` | `e637acc95c667ca5cfc7806a1d1459f7ece3dbe0dd26ed92403f0b48cec9bd6d` |
+| Signer key | `ed25519:DGkEji4hQLxUYbDCYKFA5RwMJ8wfAjWKaREnwX6TpbuX` | `ed25519:GVg1ZbpCZDLUirwVcBtvXMezeJEo62gfKtK9PVzDHYdA` |
+| Quote hash (registered on-chain) | | `c79f80dc8de80a146e511a25e88d69c84243ad21c77c5eaec763ff6015e24044` |
+| Encrypted bundle | [`riverside-v1`](https://github.com/ryan-tobin/blindfold/releases/tag/riverside-v1), SHA-256 `f67024c6e0678a34f02b1b0bc99ff9d796169ba9fc343fd3dfab211211b039ce` | [`riverside-mainnet-v1`](https://github.com/ryan-tobin/blindfold/releases/tag/riverside-mainnet-v1), SHA-256 `5a094f8d205aafa5c95d940886234b20cc155607ecf8442847f1443d7f2252c0` |
 
-Check it yourself while it's running: `make verify REQUEST=2 CONTRACT_ID=blindfold.ryan-tobin.testnet URL=<the URL above>`. Request 2 was answered inside the enclave and settled in [this transaction](https://testnet.nearblocks.io/txns/8B2Aape5LfR7dQ3Gih3Wj76zDehCxPGVpJ3bDdqqBxbA); all 20 checks pass.
+The mainnet enclave is a separate Phala app, so the key service gave it its own keys, and the owner encrypted a second bundle to them. Check the engine image came from this repo:
+
+```bash
+gh attestation verify oci://ghcr.io/ryan-tobin/blindfold-engine@sha256:f45c13ea61c75006f249c95e37f684746c63496208f1db25e84aca84678a8f1e --repo ryan-tobin/blindfold
+```
+
+Check them yourself while they're running:
+
+```bash
+make verify REQUEST=3 CONTRACT_ID=blindfold.ryan-tobin.testnet URL=<testnet URL>
+python verify/verify.py --request 0 --contract blindfold.ryan-tobin.near --network mainnet --engine <mainnet URL> --compose docker-compose.mainnet.yml
+```
+
+Testnet request 3 was paid by the buyer agent and answered and settled inside the enclave; every check passes. Mainnet request 0 is the first question paid with real USDC: `ryan-tobin.near` deposited 0.9 of the bridged USDC, set caps of 0.05 a question and 0.5 a day, and its agent key paid 0.05 USDC in [this transaction](https://nearblocks.io/txns/GiyUrmw7F69j9tiXFgoeJvFAEtk2MF7YBvu9TWXF2ZDq). Its receipt hash is `05a6f0f9e1d9f0070fec1553fac35a2e5480df775d7978e3e726b5e93e679837`, and all 24 checks pass. The Day 7 testnet run (request 2, settled in [this transaction](https://testnet.nearblocks.io/txns/8B2Aape5LfR7dQ3Gih3Wj76zDehCxPGVpJ3bDdqqBxbA)) was signed by the same testnet enclave key under the earlier compose hash `b6f5b259…b583`.
 
 ## Built during the hackathon
 
@@ -234,6 +310,8 @@ _Kept up to date as the build goes._
 | [near-sdk-rs](https://github.com/near/near-sdk-rs) 5.29.1 | The NEAR contract | MIT or Apache 2.0 |
 | [cargo-near](https://github.com/near/cargo-near) 0.22.0 | Builds the contract; project layout from `cargo near new` | MIT or Apache 2.0 |
 | [near-cli-rs](https://github.com/near/near-cli-rs) 0.30.1 | Creates accounts, deploys, and signs calls from `owner/register.py` | MIT or Apache 2.0 |
+| [NEAR Intents 1Click API](https://docs.near-intents.org/) | Bridges USDC from Base or Arbitrum to NEAR (`agent/fund.py`), called over plain HTTPS | service |
+| [Circle USDC](https://www.circle.com/usdc) on NEAR | The payment token, testnet and mainnet | service |
 | [NEAR AI Cloud](https://docs.near.ai/cloud/) | Private TEE model inference for `/plan`, with attestation and response signatures, called over plain HTTPS | service |
 | Python standard library | Everything else in the engine, including SQLite for the budget ledger | PSF |
 | Claude (Anthropic), via Claude Code | AI assistance: project brief, planning, and docs | n/a |
@@ -248,7 +326,11 @@ _Kept up to date as the build goes._
 - `readmit_30d` near the end of the data (after Oct 1, 2026) can miss readmissions that happen after the data ends.
 - The simulated enclave's keys come from the simulator's public sample key file, so anyone can derive them, so it only ever runs locally.
 - Phala's key service (KMS) derives the enclave's keys from its app id. Redeploying the same app keeps them; a new app gets new keys, and the owner re-encrypts the bundle (`make bundle`).
-- Without `CONTRACT_ID` the engine runs in local mode: the buyer in `/query` is a name the caller types and nobody pays. Buyers pay with USDC from Day 9; until then `make pay` works on a dataset whose price is 0.
+- Without `CONTRACT_ID` the engine runs in local mode: the buyer in `/query` is a name the caller types and nobody pays. With a contract, buyers pay in USDC from a prepaid balance (see Payments and the buyer agent).
+- The agent's key is only as safe as the file it lives in (`~/.blindfold/agent-keys`, chmod 600). Whoever holds it can spend up to the caps, and burn its NEAR gas allowance, until the buyer runs `revoke-agent`.
+- The planner sometimes picks a per-stay rate at ε 0.2 when a per-patient rate at ε 1.0 would be much tighter, which gives error bars of ±11 to ±16 points; small headline counts at ε 0.1 get ±30. A planner prompt fix is next, with the next engine image.
+- Both enclaves are started only for demos, to keep the cost down (about $0.06 an hour each). While one is stopped, its contract still takes questions, and `expire` refunds any that nobody settles.
+- NEAR Intents has no testnet, so `agent/fund.py` only runs on mainnet with real money. On testnet the USDC comes from Circle's faucet.
 - Trust model: the contract doesn't check the Intel TDX quote itself, which is too heavy for a contract. It trusts one registered enclave account, whose key exists only inside the enclave, and stores the quote hash so anyone can check it off-chain.
 - Trust in Phala: the enclave's keys come from Phala's key service (KMS), which only releases them to a VM whose quote and compose hash it accepts, and the OS image is dstack's. The verifier checks the OS image hash is in the quote but doesn't rebuild the image. A KMS run on-chain (dstack supports one on Base) would remove that trust.
 - The contract account pays NEAR storage for every question it records (a few hundred bytes each).
