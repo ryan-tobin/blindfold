@@ -103,7 +103,7 @@ def main() -> None:
         info = get_json(f"{a.engine.rstrip('/')}/info")
         check(att["signer_pubkey"] == r["signer_pubkey"], "signer is the engine's enclave key")
         compose = a.compose.read_text() if a.compose.exists() else None
-        for ok, text in attest.check(att, compose, a.pccs):
+        for ok, text in attest.check(att, compose, a.pccs, a.compose.name):
             check(ok, text)
         if att["mode"] == "tdx":
             check(r.get("compose_hash") == att["compose_hash"], "the receipt names this compose hash")

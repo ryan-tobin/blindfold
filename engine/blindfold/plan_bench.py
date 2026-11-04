@@ -19,7 +19,7 @@ import statistics
 import time
 
 from . import load
-from .planner import DEFAULT_MODEL, NearAI, PlanError, Planner
+from .planner import DEFAULT_MODEL, NearAI, PlanError, Planner, with_plan_epsilon
 from .planner_stub import QUESTIONS, StubPlanner
 from .spec import validate
 
@@ -27,7 +27,10 @@ from .spec import validate
 def cases(schema: dict) -> list[dict]:
     out = []
     for g in json.loads(QUESTIONS.read_text())["groups"]:
-        want = "refused" if g["expected"] == "refused" else [validate(e, schema).canonical_json() for e in g["expected"]]
+        if g["expected"] == "refused":
+            want = "refused"
+        else:
+            want = [validate(with_plan_epsilon(e, schema), schema).canonical_json() for e in g["expected"]]
         for i, q in enumerate([g["question"]] + g["paraphrases"]):
             out.append({"id": f"{g['id']}/{i}", "question": q, "want": want})
     return out

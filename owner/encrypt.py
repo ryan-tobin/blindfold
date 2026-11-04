@@ -51,7 +51,7 @@ def main() -> None:
     with urllib.request.urlopen(req, timeout=30) as r:
         att = json.loads(r.read())
     print(f"enclave mode {att['mode']}, encryption key {att['encryption_pubkey']}")
-    results = attest.check(att, a.compose.read_text())
+    results = attest.check(att, a.compose.read_text(), compose_name=a.compose.name)
     for ok, text in results:
         print({True: "✓", None: "!", False: "✗"}[ok], text)
     if any(ok is False for ok, _ in results):

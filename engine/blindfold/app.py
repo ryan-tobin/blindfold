@@ -49,6 +49,7 @@ from typing import Any, Callable
 
 import duckdb
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import enclave as enclave_mod
@@ -352,6 +353,8 @@ def create_app(engine: Blindfold | None = None) -> FastAPI:
         description="Answers, not data: differentially private answers with a signed receipt for every question.",
     )
     app.state.engine = engine
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET","POST"],
+                       allow_headers=["content-type"])
 
     @app.get("/schema")
     def get_schema() -> Response:

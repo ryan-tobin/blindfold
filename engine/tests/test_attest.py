@@ -123,3 +123,7 @@ def test_the_near_ai_key_is_the_one_allowed_secret():
     att["compose_hash"] = hashlib.sha256(att["app_compose"].encode()).hexdigest()
     flagged = [(ok, t) for ok, t in attest.check(att, COMPOSE) if "operator can set" in t]
     assert flagged == [(True, "the operator can set only NEAR_AI_API_KEY (an encrypted secret; it changes no code)")]
+
+def test_the_compose_label_names_the_file_checked():
+    texts = [t for _, t in attest.check(make_att(), COMPOSE, compose_name="docker-compose.mainnet.yml")]
+    assert "the deployed compose file is docker-compose.mainnet.yml from this repo" in texts

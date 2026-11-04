@@ -62,6 +62,13 @@ def test_schema_is_served_byte_for_byte(tiny_db, tmp_path):
     r = client.get("/schema")
     assert r.content == load.DEFAULT_SCHEMA.read_bytes()
 
+def test_the_browser_ui_may_call_the_engine(tiny_db, tmp_path):
+    _, client = make(tiny_db, tmp_path)
+    pre = client.options("/plan", headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "POST",
+                                           "Access-Control-Request-Headers": "content-type"})
+    assert pre.status_code == 200 and pre.headers["access-control-allow-origin"] == "*"
+    r = client.get("/budget", headers={"Origin": "http://localhost:5173"})
+    assert r.headers["access-control-allow-origin"] == "*" and "access-control-allow-credentials" not in r.headers
 
 def test_fresh_budget(tiny_db, tmp_path):
     _, client = make(tiny_db, tmp_path)

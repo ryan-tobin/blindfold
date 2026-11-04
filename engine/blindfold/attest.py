@@ -92,8 +92,10 @@ def intel_check(quote: bytes, pccs: str = PHALA_PCCS) -> tuple[bool | None, str]
     return ok, f"quote signed by a genuine Intel TDX CPU (TCB {report.status}{advisories})"
 
 
-def check(att: dict, compose_file: str | None = None, pccs: str = PHALA_PCCS) -> list[tuple[bool | None, str]]:
-    """All the checks on one /attestation reply, as (ok, text): True pass, None warn, False fail."""
+def check(att: dict, compose_file: str | None = None, pccs: str = PHALA_PCCS,
+          compose_name: str = "docker-compose.tee.yml") -> list[tuple[bool | None, str]]:
+    """All the checks on one /attestation reply, as (ok, text): True pass, None warn, False fail.
+    compose_file is the text of the repo's compose file, compose_name its file name (for the label)."""
     out: list[tuple[bool | None, str]] = []
     rd = expected_report_data(att)
     out.append((att["report_data"] == rd.hex(), "report_data = sha256(signer key + encryption key + schema hash)"))
@@ -128,7 +130,7 @@ def check(att: dict, compose_file: str | None = None, pccs: str = PHALA_PCCS) ->
         manifest = {}
     if compose_file is not None:
         out.append((manifest.get("docker_compose_file") == compose_file,
-                    "the deployed compose file is docker-compose.tee.yml from this repo"))
+                                        f"the deployed compose file is {compose_name} from this repo"))
     envs = manifest.get("allowed_envs") or []
     extra = sorted(set(envs) - SECRET_ENVS)
     if not envs:

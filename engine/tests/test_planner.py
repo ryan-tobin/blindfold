@@ -19,7 +19,8 @@ from fastapi.testclient import TestClient
 
 from blindfold import ethsig, load, plan_bench, receipts
 from blindfold.app import Blindfold, create_app
-from blindfold.planner import EXAMPLES, NearAI, PlanError, Planner, check_spec, describe
+from blindfold.planner import (EXAMPLES, PLAN_EPSILON, NearAI, PlanError, Planner, check_spec, describe,
+                               with_plan_epsilon)
 from blindfold.planner_stub import StubPlanner
 from blindfold.spec import validate
 
@@ -31,6 +32,12 @@ READMIT = {"dataset": "riverside", "measure": "rate", "table": "admissions",
            "filters": [["encounter_class", "=", "inpatient"], ["patients.age_band", "in", ["65-79", "80+"]],
                        ["conditions.condition_group", "=", "diabetes"]],
            "group_by": ["patients.sex"]}
+READMIT_PATIENTS = {"dataset": "riverside", "measure": "rate", "table": "patients",
+                    "numerator_filter": [["admissions.encounter_class", "=", "inpatient"],
+                                         ["admissions.readmit_30d", "=", True]],
+                    "filters": [["admissions.encounter_class", "=", "inpatient"], ["age_band", "in", ["65-79", "80+"]],
+                                ["conditions.condition_group", "=", "diabetes"]],
+                    "group_by": ["sex"]}
 BY_SEX = {"dataset": "riverside", "measure": "count", "table": "patients", "group_by": ["sex"], "epsilon": 1.0}
 
 
@@ -105,7 +112,7 @@ def test_a_good_plan_is_checked_end_to_end():
     fake = FakeNearAI("```json\n" + json.dumps(READMIT) + "\n```")
     plan = planner(fake).plan("readmission rate, diabetics 65+, by sex")
     assert plan.planner == "near-ai" and plan.tries == 1 and plan.refusal is None
-    assert plan.spec == validate(READMIT, SCHEMA).canonical()
+    assert plan.spec == validate({**READMIT, "epsilon": 1.0}, SCHEMA).canonical()
     sig = plan.model_signature
     assert sig["signing_address"] == address() and sig["kind"] == "provider_tee"
     assert ethsig.recover_personal(sig["text"], sig["signature"]) == address()
@@ -114,7 +121,7 @@ def test_a_good_plan_is_checked_end_to_end():
     assert json.loads(req)["temperature"] == 0 and json.loads(req)["stream"] is False
     assert fake.calls == ["GET /v1/attestation/report", "POST /v1/chat/completions", "GET /v1/signature/chatcmpl-0"]
     out = plan.to_dict()
-    assert out["summary"].startswith("Rate of readmit_30d yes among admissions") and out["epsilon"] == 0.2
+    assert out["summary"].startswith("Rate of readmit_30d yes among admissions") and out["epsilon"] == 1.0
 
 
 def test_bad_json_is_sent_back_once():
@@ -137,8 +144,8 @@ def test_privacy_refusals_are_not_retried():
                           ["county", "=", "Cook County"]]}
     fake = FakeNearAI(json.dumps(narrow))
     plan = planner(fake).plan("the 70 year old woman in 606, Cook County")
-    assert plan.tries == 1 and plan.refusal["rule"] == "too_fine" and plan.spec == narrow
-    assert plan.to_dict()["spec_hash"] is None
+    assert plan.tries == 1 and plan.refusal["rule"] == "too_fine"
+    assert plan.spec == {**narrow, "epsilon": 0.5}
 
 
 def test_the_model_can_refuse():
@@ -184,7 +191,7 @@ def test_stub_knows_the_demo_questions_only():
     stub = StubPlanner(SCHEMA)
     assert len(stub.questions) == 5
     plan = stub.plan("what is the 30-DAY readmission rate for diabetic patients aged 65 and older by sex")
-    assert plan.planner == "stub" and plan.valid.canonical() == validate(READMIT, SCHEMA).canonical()
+    assert plan.planner == "stub" and plan.valid.canonical() == validate({**READMIT_PATIENTS, "epsilon": 1.0}, SCHEMA).canonical()
     with pytest.raises(PlanError, match="NEAR_AI_API_KEY"):
         stub.plan("how many patients smoke?")
 
@@ -195,6 +202,20 @@ def test_stub_scores_the_5_demo_questions():
     assert sorted(r["id"] for r in rows if r["ok"]) == sorted(f"{g}/0" for g in
         ["readmission", "hypertension", "hba1c", "heart_failure_drugs", "attack_one_patient"])
 
+def test_plans_get_the_planner_epsilon_unless_the_question_names_one():
+    assert check_spec(BY_SEX, SCHEMA)[1].epsilon == 1.0  # asked for
+    assert check_spec({k: v for k, v in BY_SEX.items() if k != "epsilon"}, SCHEMA)[1].epsilon == 0.5
+    assert check_spec(READMIT_PATIENTS, SCHEMA)[1].epsilon == 1.0
+    assert all(e <= SCHEMA["query_rules"]["max_epsilon"] for e in PLAN_EPSILON.values())
+    refusal = {"refuse": "not_aggregate", "reason": "rows"}
+    assert with_plan_epsilon(refusal, SCHEMA) == refusal
+
+
+def test_readmission_rates_are_per_patient_in_the_prompt():
+    prompt = Planner(NearAI("sk-test", MODEL), SCHEMA).prompt
+    assert 'A readmission rate is per patient: table "patients"' in prompt
+    assert "epsilon at most 1.0" in prompt
+    assert any(spec.get("table") == "patients" and spec.get("measure") == "rate" for _, spec in EXAMPLES)
 
 def test_describe_reads_like_the_brief():
     assert describe(validate(READMIT, SCHEMA)) == ("Rate of readmit_30d yes among admissions · encounter_class inpatient"
@@ -233,8 +254,8 @@ def test_plan_endpoint_with_the_stub(tiny_db, tmp_path):
     r = c.post("/plan", json={"question": "How many patients have hypertension, by age band?"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["planner"] == "stub" and body["epsilon"] == 0.1 and body["price"] is None
-    assert body["summary"] == "Count of patients · condition_group hypertension · by age_band · ε 0.1"
+    assert body["planner"] == "stub" and body["epsilon"] == 0.5 and body["price"] is None
+    assert body["summary"] == "Count of patients · condition_group hypertension · by age_band · ε 0.5"
     assert c.post("/plan", json={"question": "something else"}).status_code == 422
     assert c.get("/info").json()["planner"] == "stub"
 

@@ -81,9 +81,21 @@ class Plan:
             "model_signature": self.model_signature,
             "evidence": self.evidence,
         }
+
+PLAN_EPSILON = {"rate": 1.0, "mean": 1.0, "count": 0.5, "histogram": 0.5, "sum": 0.5}
+
+def with_plan_epsilon(raw: Any, schema: dict) -> Any:
+    """raw with PLAN_EPSILON filled in, if it is a spec with no epsilon of its own."""
+    if not isinstance(raw, dict) or "refuse" in raw or raw.get("epsilon") is not None:
+        return raw
+    eps = PLAN_EPSILON.get(raw.get("measure"))
+    if eps is None:
+        return raw
+    return {**raw, "epsilon": min(eps, schema["query_rules"]["max_epsilon"])}
     
 def check_spec(raw: Any, schema: dict) -> tuple[dict | None, ValidSpec | None, dict | None]:
     """(spec, valid, refusal) for a spec the model wrote. Raises Refused only for off_schema"""
+    raw = with_plan_epsilon(raw, schema)
     if isinstance(raw, dict) and "refuse" in raw:
         rule = raw.get('refuse') if raw.get('refuse') in (NOT_AGGREGATE, OFF_SCHEMA) else NOT_AGGREGATE
         reason = str(raw.get('reason') or "the question can't be answered with aggregate statistics")[:300]
@@ -136,9 +148,10 @@ def describe(v: ValidSpec) -> str:
 EXAMPLES = [
     ("How many patients are in the dataset, by sex?",
      {"dataset": "riverside", "measure": "count", "table": "patients", "group_by": ["sex"]}),
-    ("What share of inpatient admissions for COPD patients aged 50 to 64 led to a readmission within 30 days?",
-     {"dataset": "riverside", "measure": "rate", "table": "admissions", "numerator_filter": [["readmit_30d", "=", True]],
-      "filters": [["encounter_class", "=", "inpatient"], ["patients.age_band", "=", "50-64"],
+    ("What share of COPD patients aged 50 to 64 with a hospital stay were readmitted within 30 days?",
+     {"dataset": "riverside", "measure": "rate", "table": "patients",
+      "numerator_filter": [["admissions.encounter_class", "=", "inpatient"], ["admissions.readmit_30d", "=", True]],
+      "filters": [["admissions.encounter_class", "=", "inpatient"], ["age_band", "=", "50-64"],
                   ["conditions.condition_group", "=", "copd"]]}),
     ("Average LDL cholesterol for patients on statins",
      {"dataset": "riverside", "measure": "mean", "table": "labs", "column": "value",
@@ -186,7 +199,7 @@ Column names: a bare name is a column of "table". "patients.<col>" is the patien
 
 Guidance:
 - Counting people: table "patients". Counting visits or stays: table "admissions".
-- A readmission rate is a rate over inpatient admissions: numerator [["readmit_30d", "=", true]], with ["encounter_class", "=", "inpatient"] in filters.
+- A readmission rate is per patient: table "patients", numerator [["admissions.encounter_class", "=", "inpatient"], ["admissions.readmit_30d", "=", true]], with ["admissions.encounter_class", "=", "inpatient"] in filters. Only if the question counts admissions or stays themselves, use table "admissions", numerator [["readmit_30d", "=", true]], with ["encounter_class", "=", "inpatient"] in filters.
 - Ages exist only as bands. Map an age or range to every band it covers: "65 and older" is ["65-79", "80+"]; "age 70" is "65-79".
 - ZIP codes exist only as their first 3 digits (zip3): ZIP 60614 is "606".
 - A sum or mean of labs.value needs exactly one test filter, e.g. ["test", "=", "hba1c"]. A1c and glycated hemoglobin are hba1c; blood pressure is systolic_bp; CHF is heart_failure; high blood pressure is hypertension.
@@ -211,7 +224,7 @@ def system_prompt(schema: dict) -> str:
         max_cells=rules["max_cells"],
         max_qi=rules["max_quasi_identifiers"],
         min_days=rules["min_date_range_days"],
-        max_eps=["max_epsilon"],
+        max_eps=rules["max_epsilon"],
         schema=json.dumps(schema,separators=(",", ":")), 
         examples=examples
     )
