@@ -15,8 +15,9 @@ REQUEST ?=
 ALLOW_SIM ?=
 Q?= What is the 30-day readmission rate for diabetic patients aged 65 and older, by sex?
 MODELS ?=
+GOAL ?=
 
-.PHONY: help data test sql ask serve query reset contract register up register-enclave pay verify demo bench deploy bundle
+.PHONY: help data test sql ask serve query reset contract register up register-enclave pay verify demo bench deploy bundle buy
 
 help:
 	@echo "make data    generate 10,000 Synthea patients and build the 5 analytic tables"
@@ -39,6 +40,7 @@ help:
 	@echo "make bundle  check the enclave, then encrypt the tables to its key (URL=... CONTRACT_ID=... OWNER=...)"
 	@echo "make plan	turn a plain-English question into a QuerySpec, free (Q=\"...\")"
 	@echo "make plan-bench	score the planner on the 25 test questions (MODELS=a,b or MODELS=stub)"
+	@echo "make buy		the buyer agent: plan, pay with its function-call key, answer, report (BUYER=... Q=... or GOAL=...)"
 
 data:
 	bash scripts/generate_data.sh
@@ -46,6 +48,7 @@ data:
 
 test:
 	cd engine && $(PYTHON) -m pytest -q
+	$(PYTHON) -m pytest -q agent/tests
 	cd contract && cargo test -q
 
 sql:
@@ -92,6 +95,9 @@ ask-question:
 
 pay:
 	$(PYTHON) agent/pay_and_ask.py --contract $(CONTRACT_ID) --buyer $(BUYER) --spec $(SPEC) --engine $(URL) --network $(NEAR_NETWORK)
+
+buy:
+	$(PYTHON) agent/buyer.py --buyer $(BUYER) --engine $(URL) --network $(NEAR_NETWORK) $(if $(CONTRACT_ID),--contract $(CONTRACT_ID)) $(if $(GOAL),--goal "$(GOAL)","$(Q)")
 
 verify:
 	$(PYTHON) verify/verify.py --engine $(URL) --request $(REQUEST) $(if $(CONTRACT_ID),--contract $(CONTRACT_ID)) --network $(NEAR_NETWORK)

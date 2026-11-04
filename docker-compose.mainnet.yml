@@ -1,0 +1,24 @@
+# The mainnet engine: a second Intel TDX enclave on Phala Cloud, in its own VM.
+# Same image as docker-compose.tee.yml (testnet), pointed at the mainnet
+# contract. Its own app id gives it its own keys, so it has its own encrypted
+# bundle. Like the testnet file, this whole file is measured into the quote,
+# and NEAR_AI_API_KEY is the one secret, encrypted by `phala deploy -e`.
+services:
+  engine:
+    image: ghcr.io/ryan-tobin/blindfold-engine@sha256:f45c13ea61c75006f249c95e37f684746c63496208f1db25e84aca84678a8f1e
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    shm_size: 256mb
+    environment:
+      CONTRACT_ID: blindfold.ryan-tobin.near
+      NEAR_NETWORK: mainnet
+      BUNDLE_URL: https://github.com/ryan-tobin/blindfold/releases/download/riverside-mainnet-v1/riverside-mainnet.bundle
+      NEAR_AI_MODEL: z-ai/glm-5.3-flash
+      NEAR_AI_API_KEY: ${NEAR_AI_API_KEY}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - state:/app/data
+
+volumes:
+  state:

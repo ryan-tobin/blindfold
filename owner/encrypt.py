@@ -43,13 +43,15 @@ def main() -> None:
     p.add_argument("--db", type=Path, default=load.DEFAULT_DB)
     p.add_argument("--out", type=Path, default=ROOT / "data" / "riverside.bundle")
     p.add_argument("--allow-simulated", action="store_true", help="for local tests with the simulator")
+    p.add_argument("--compose", type=Path, default=ROOT / "docker-compose.tee.yml",
+                   help="the compose file the enclave should run (docker-compose.mainnet.yml for mainnet)")
     a = p.parse_args()
 
     req = urllib.request.Request(a.engine.rstrip("/") + "/attestation", headers={"User-Agent": "blindfold-owner"})
     with urllib.request.urlopen(req, timeout=30) as r:
         att = json.loads(r.read())
     print(f"enclave mode {att['mode']}, encryption key {att['encryption_pubkey']}")
-    results = attest.check(att, (ROOT / "docker-compose.tee.yml").read_text())
+    results = attest.check(att, a.compose.read_text())
     for ok, text in results:
         print({True: "✓", None: "!", False: "✗"}[ok], text)
     if any(ok is False for ok, _ in results):

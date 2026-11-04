@@ -40,6 +40,7 @@ def main() -> None:
     p.add_argument("--fund", default="1 NEAR", help="NEAR sent to the enclave account for gas")
     p.add_argument("--no-fund", action="store_true")
     p.add_argument("--network", default=os.environ.get("NEAR_NETWORK", "testnet"))
+    p.add_argument("--compose", type=Path, default=Path(__file__).resolve().parents[1] / "docker-compose.tee.yml", help="the compose file the enclave should run (docker-compose.mainnet.yml for mainnet)")
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
     if not a.contract:
@@ -48,8 +49,7 @@ def main() -> None:
     with urllib.request.urlopen(a.engine.rstrip("/") + "/attestation", timeout=30) as r:
         att = json.loads(r.read())
     print(f"enclave mode {att['mode']}, account {att['account_id']}")
-    compose = (Path(__file__).resolve().parents[1] / "docker-compose.tee.yml").read_text()
-    results = attest.check(att, compose)
+    results = attest.check(att, a.compose.read_text())
     for ok, text in results:
         print({True: "✓", None: "!", False: "✗"}[ok], text)
     if any(ok is False for ok, _ in results):

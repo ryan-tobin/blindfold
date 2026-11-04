@@ -1,11 +1,13 @@
 # The engine in a real Intel TDX enclave on Phala Cloud.
 # This whole file is measured into the enclave's quote (its compose hash), so
-# the image is pinned by digest and there are no secrets or env vars to set:
-# anyone can check that the enclave runs exactly this. The data arrives
-# encrypted from BUNDLE_URL and must match the hash listed on CONTRACT_ID.
+# the image is pinned by digest and anyone can check that the enclave runs
+# exactly this. The data arrives encrypted from BUNDLE_URL and must match the
+# hash listed on CONTRACT_ID. The one secret, NEAR_AI_API_KEY, is encrypted
+# to this app's key by `phala deploy -e`, so only the enclave can read it.
+# The verifier accepts that one env name and no others (attest.SECRET_ENVS).
 services:
   engine:
-    image: ghcr.io/ryan-tobin/blindfold-engine@sha256:535238f4cd8da65ae5125846e457e099725f33e2a291b5763b8803fe19301d1a
+    image: ghcr.io/ryan-tobin/blindfold-engine@sha256:f45c13ea61c75006f249c95e37f684746c63496208f1db25e84aca84678a8f1e
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -14,6 +16,8 @@ services:
       CONTRACT_ID: blindfold.ryan-tobin.testnet
       NEAR_NETWORK: testnet
       BUNDLE_URL: https://github.com/ryan-tobin/blindfold/releases/download/riverside-v1/riverside.bundle
+      NEAR_AI_MODEL: z-ai/glm-5.3-flash
+      NEAR_AI_API_KEY: ${NEAR_AI_API_KEY}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - state:/app/data
