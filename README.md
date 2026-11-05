@@ -14,7 +14,7 @@ A clinic encrypts its patient records so that only one audited program, running 
 
 - **Privacy & Private AI (primary):** the data never leaves the enclave unencrypted, every answer is differentially private with a public, on-chain privacy budget, and even the buyer's question stays private, planned inside the enclave by a Private TEE model on NEAR AI Cloud whose signature goes into the receipt.
 - **Agent Economy:** agents buy answers with a function-call key that can only call `request_query`, inside per-question and daily caps the human sets. USDC comes in from Base or Arbitrum through NEAR Intents, the contract escrows each fee, and the owner is paid only when the enclave settles an answer.
-- **AI Security & Defense:** an agent that tries to single out a patient is refused before it pays and again inside the enclave, and the refusal is recorded on-chain with a refund. Repeating a question returns the same noise for free, so averaging attacks don't work, and anyone can verify a receipt down to the enclave's measured code, in the browser or with `make verify`.
+- **AI Security & Defense:** an agent that tries to single out a patient is refused before it pays and once again inside the enclave, and the refusal is recorded on-chain with a refund. Repeating a question returns the same noise for free, so averaging attacks don't work, and anyone can verify a receipt down to the enclave's measured code, in the browser or with `make verify`.
 
 ## Quickstart
 
