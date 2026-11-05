@@ -6,11 +6,16 @@ import { engine, toMillionths, usdc, view } from "./api.js";
 import { connectedAccount, makeConnector } from "./wallet.js";
 import { DatasetCard, Feed } from "./Dataset.jsx";
 import { Ask } from "./Ask.jsx";
+import { Verify } from "./Verify.jsx";
+import { Owner } from "./Owner.jsx";
+import { Bench } from "./Bench.jsx";
 
 const NET_NAME = currentNetwork();
 const NET = NETWORKS[NET_NAME];
 const connector = NET.contract ? makeConnector(NET_NAME, NET) : null;
 const schema = JSON.parse(schemaText);
+const TABS = { ask: "Ask", verify: "Verify", owner: "Owner", bench: "Accuracy"};
+const START_TAB = new URLSearchParams(location.search).get("tab");
 
 async function sha256(text) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -25,6 +30,20 @@ export default function App() {
   const [info, setInfo] = useState(null);
   const [schemaOk, setSchemaOk] = useState(null);
   const [error, setError] = useState("");
+  const [tab, setTab] = useState(TABS[START_TAB] ? START_TAB : "ask");
+  const [verifyTarget, setVerifyTarget] = useState(null);
+
+  function go(name) {
+    setTab(name);
+    const q = new URLSearchParams(location.search);
+    q.set("tab", name);
+    history.replaceState(null, "", `?${q}`);
+  }
+
+  function verify(target) {
+    setVerifyTarget({ ...target });
+    go("verify");
+  }
 
   const refresh = useCallback(async () => {
     engine(NET, "/info").then(setInfo, () => setInfo(null));
@@ -82,7 +101,7 @@ export default function App() {
           <span>answers, not data</span>
         </div>
         <div className="row">
-          <select value={NET_NAME} onChange={(e) => { location.search = `?net=${e.target.value}`; }}>
+          <select value={NET_NAME} onChange={(e) => { location.search = `?net=${e.target.value}&tab=${tab}`; }}>
             {Object.keys(NETWORKS).map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
           {connector && (account ? (
@@ -100,14 +119,22 @@ export default function App() {
           {usdc(balance.daily_max)} a day ({usdc(balance.spent_today)} spent today)
         </p>
       )}
+      <nav className="tabs">
+        {Object.entries(TABS).map(([name, label]) => (
+          <button key={name} className={tab === name ? "active" : ""} onClick={() => go(name)}>{label}</button>
+        ))}
+      </nav>
       <main>
         {error && <p className="error">{error}</p>}
-        <div className="grid">
+        <div className="grid" hidden={tab !== "ask"}>
           <DatasetCard schema={schema} dataset={dataset} info={info} schemaOk={schemaOk} net={NET} />
           <Ask net={NET} connector={connector} account={account} dataset={dataset} balance={balance}
-               onAnswered={onAnswered} />
+               onAnswered={onAnswered} onVerify={verify} />
         </div>
-        <Feed rows={feed} local={!NET.contract} />
+        {tab === "verify" && <Verify net={NET} target={verifyTarget} />}
+        {tab === "owner" && <Owner net={NET} connector={connector} account={account} />}
+        {tab === "bench" && <Bench />}
+        {(tab === "ask" || tab === "verify") && <Feed rows={feed} local={!NET.contract} onVerify={verify} />}
       </main>
       <footer>
         {NET.contract ? (

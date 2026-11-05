@@ -2,18 +2,25 @@
 import { DATASET } from "./config.js";
 
 export async function engine(net, path, body) {
+  return (await engineRaw(net, path, body)).data;
+}
+
+// The reply parsed, plus its exact text (the verify screen rehashes that text).
+export async function engineRaw(net, path, body) {
   const init = body === undefined ? {} : {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   };
   const res = await fetch(net.engine + path, init);
-  const data = await res.json().catch(() => ({}));
+  const text = await res.text();
+  let data = {};
+  try { data = JSON.parse(text); } catch { /* not JSON: an error page */ }
   if (!res.ok) {
     const detail = typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail);
     throw new Error(data.detail ? detail : `engine: HTTP ${res.status}`);
   }
-  return data;
+  return { data, text };
 }
 
 export async function view(net, method, args = {}) {
@@ -54,16 +61,8 @@ export function precheck(dataset, balance, epsilon) {
 // The wallet signs request_query. The request id is the call's return value,
 // or, if the wallet doesn't hand back the outcome, the newest matching request.
 export async function payForPlan(connector, net, account, plan) {
-  const wallet = await connector.wallet();
   const args = { dataset_id: DATASET, spec_hash: plan.spec_hash, epsilon: toMillionths(plan.epsilon) };
-  const outcome = await wallet.signAndSendTransaction({
-    signerId: account,
-    receiverId: net.contract,
-    actions: [{
-      type: "FunctionCall",
-      params: { methodName: "request_query", args, gas: "30000000000000", deposit: "0" },
-    }],
-  });
+  const outcome = await callContract(connector, net, account, "request_query", args);
   const tx = outcome?.transaction?.hash || outcome?.transaction_outcome?.id || null;
   const value = outcome?.status?.SuccessValue;
   if (value) return { id: Number(JSON.parse(atob(value))), tx };
@@ -71,4 +70,14 @@ export async function payForPlan(connector, net, account, plan) {
   const mine = recent.find((r) => r.buyer === account && r.spec_hash === plan.spec_hash && r.status === "pending");
   if (!mine) throw new Error("the payment went through, but its request isn't on-chain yet: wait a moment and look in the feed");
   return { id: Number(mine.id), tx };
+}
+
+// One function call on the contract, signed by the connected wallet. deposit is in yoctoNEAR.
+export async function callContract(connector, net, account, method, args, deposit = "0", gas = "30000000000000") {
+  const wallet = await connector.wallet();
+  return wallet.signAndSendTransaction({
+    signerId: account,
+    receiverId: net.contract,
+    actions: [{ type: "FunctionCall", params: { methodName: method, args, gas, deposit } }],
+  });
 }

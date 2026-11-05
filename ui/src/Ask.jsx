@@ -2,12 +2,31 @@
 import { useState } from "react";
 import questions from "../../datasets/riverside/planner_questions.json";
 import { AnswerChart } from "./charts.jsx";
-import { engine, payForPlan, precheck, usdc } from "./api.js";
+import { engine, engineRaw, payForPlan, precheck, usdc } from "./api.js";
+import { canonical, sha256hex } from "./canon.js";
 
 const DEMO = questions.groups.filter((g) => g.expected !== "refused").map((g) => g.question);
+const ATTACK = questions.groups.find((g) => g.id === "attack_one_patient");
 
-export function Ask({ net, connector, account, dataset, balance, onAnswered }) {
+// Attack mode's plan, made ahead of time: the spec the planner writes for the attack
+// question, with the planner's default ε for a histogram. The live planner can take
+// 90 s on it. A spec that breaks the rules is hashed raw, as the engine does.
+async function attackPlan(dataset) {
+  const spec = { ...ATTACK.stub_spec, epsilon: 0.5 };
+  return {
+    premade: true,
+    spec,
+    spec_hash: await sha256hex(canonical(spec)),
+    epsilon: spec.epsilon,
+    summary: "Histogram of condition_group · sex female · age_band 65-79 · zip3 606 · admitted 2026-03-03 · ε 0.5",
+    will_refuse: { rule: "too_fine", reason: "filter on 'admissions.admit_date': date ranges must cover at least 30 days" },
+    price: dataset && Number(dataset.price) ? { amount: dataset.price } : null,
+  };
+}
+
+export function Ask({ net, connector, account, dataset, balance, onAnswered, onVerify }) {
   const [question, setQuestion] = useState(DEMO[0]);
+  const [attack, setAttack] = useState(false);
   const [plan, setPlan] = useState(null);
   const [result, setResult] = useState(null);
   const [step, setStep] = useState("");
@@ -19,6 +38,14 @@ export function Ask({ net, connector, account, dataset, balance, onAnswered }) {
     setQuestion(q);
     setPlan(null);
     setResult(null);
+  }
+
+  async function toggleAttack(on) {
+    setAttack(on);
+    setResult(null);
+    setError("");
+    setQuestion(on ? ATTACK.question : DEMO[0]);
+    setPlan(on ? await attackPlan(dataset) : null);
   }
 
   async function run(label, fn) {
@@ -49,20 +76,26 @@ export function Ask({ net, connector, account, dataset, balance, onAnswered }) {
       setStep(`Paid: request #${paid.id}. The enclave is answering and settling on-chain…`);
       body = { request_id: paid.id, spec: plan.spec };
     }
-    const out = await engine(net, "/query", body);
-    setResult({ ...out, pay_tx: paid?.tx });
+    const { data: out, text } = await engineRaw(net, "/query", body);
+    setResult({ ...out, pay_tx: paid?.tx, raw: text });
     onAnswered(out);
   });
 
   let blocker = null;
-  if (plan?.will_refuse) blocker = `The engine will refuse this (${plan.will_refuse.rule}): ${plan.will_refuse.reason}`;
+  if (plan?.will_refuse && !(attack && plan.spec)) blocker = `The engine will refuse this (${plan.will_refuse.rule}): ${plan.will_refuse.reason}`;
   else if (plan && !local && !account) blocker = "Connect a wallet to pay.";
   else if (plan && !local && dataset && balance) blocker = precheck(dataset, balance, plan.epsilon);
 
   return (
     <section className="panel ask">
-      <h2>Ask a question</h2>
-      <div className="chips">
+      <div className="ask-head">
+        <h2>{attack ? "Attack mode: try to find one patient" : "Ask a question"}</h2>
+        <label className="toggle">
+          <input type="checkbox" checked={attack} disabled={busy} onChange={(e) => toggleAttack(e.target.checked)} />
+          Attack mode
+        </label>
+      </div>
+      <div className="chips" hidden={attack}>
         {DEMO.map((q) => (
           <button key={q} className="chip" onClick={() => pick(q)} disabled={busy}>{q}</button>
         ))}
@@ -79,25 +112,34 @@ export function Ask({ net, connector, account, dataset, balance, onAnswered }) {
           <p className="summary">{plan.summary || "No QuerySpec"}</p>
           <p className="note">
             ε {plan.epsilon ?? "–"} · {plan.price ? usdc(plan.price.amount) : "free (local mode)"} ·{" "}
-            {plan.model ? `planned by ${plan.model} in an attested TEE, signature checked` : "planned by the offline stub"}
+            {plan.premade ? "planned ahead of time, so the demo doesn't wait on the model"
+              : plan.model ? `planned by ${plan.model} in an attested TEE, signature checked` : "planned by the offline stub"}
           </p>
+          {attack && plan.will_refuse && (
+            <p className="refused">
+              The engine will refuse this ({plan.will_refuse.rule}): {plan.will_refuse.reason}.
+              {plan.spec && (local ? " Send it anyway to get a signed refusal."
+                : " Pay anyway: the enclave signs the refusal, settles it on-chain, and the contract refunds you.")}
+            </p>
+          )}
         </div>
       )}
       {plan && !result && (
         <div className="row">
           <button className="primary" onClick={payAndAsk} disabled={busy || !!blocker}>
-            {local ? "Ask" : `Pay ${plan.price ? usdc(plan.price.amount) : ""} and ask`}
+            {attack ? (local ? "Send the attack" : `Pay ${plan.price ? usdc(plan.price.amount) : ""} and try it`)
+              : local ? "Ask" : `Pay ${plan.price ? usdc(plan.price.amount) : ""} and ask`}
           </button>
           {blocker && <span className="note">{blocker}</span>}
         </div>
       )}
       {error && <p className="error">{error}</p>}
-      {result && <Answer result={result} net={net} />}
+      {result && <Answer result={result} net={net} onVerify={onVerify} />}
     </section>
   );
 }
 
-function Answer({ result, net }) {
+function Answer({ result, net, onVerify }) {
   const r = result.receipt;
   const link = (tx, text) => net.explorer && tx && (
     <a href={`${net.explorer}/txns/${tx}`} target="_blank" rel="noreferrer">{text}</a>
@@ -122,6 +164,7 @@ function Answer({ result, net }) {
         </span>
         {link(result.pay_tx, "payment")}
         {link(result.settle_tx, "settlement")}
+        <button onClick={() => onVerify({ id: result.request_id, queryText: result.raw })}>Verify this receipt</button>
       </p>
     </div>
   );

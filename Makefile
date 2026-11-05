@@ -17,6 +17,7 @@ ALLOW_SIM ?=
 Q?= What is the 30-day readmission rate for diabetic patients aged 65 and older, by sex?
 MODELS ?=
 GOAL ?=
+EPS ?= 0.1,0.2,0.5,1
 
 .PHONY: help data test sql ask serve query reset contract register up register-enclave pay verify demo bench deploy bundle buy ui
 
@@ -36,13 +37,14 @@ help:
 	@echo "make contract  build the NEAR contract to contract/target/near/blindfold.wasm"
 	@echo "make register  list Riverside on the contract (CONTRACT_ID=... OWNER=...)"
 	@echo "make demo    start local mode (not built yet)"
-	@echo "make bench   accuracy vs epsilon benchmark (not built yet)"
+	@echo "make bench   accuracy of 200 benchmark questions at each epsilon (EPS=0.1,0.2,0.5,1 TRIALS=20)"
 	@echo "make deploy  deploy contract and enclave (not built yet)"
 	@echo "make bundle  check the enclave, then encrypt the tables to its key (URL=... CONTRACT_ID=... OWNER=...)"
 	@echo "make plan	turn a plain-English question into a QuerySpec, free (Q=\"...\")"
 	@echo "make plan-bench	score the planner on the 25 test questions (MODELS=a,b or MODELS=stub)"
 	@echo "make buy		the buyer agent: plan, pay with its function-call key, answer, report (BUYER=... Q=... or GOAL=...)"
 	@echo "make ui		the browser UI on http://localhost:5173 (needs Node 20+)"
+
 
 data:
 	bash scripts/generate_data.sh
@@ -107,5 +109,8 @@ verify:
 ui:
 	cd ui && npm install && npm run dev
 
-demo bench deploy:
+bench:
+	cd engine && $(PYTHON) -m blindfold.bench --eps $(EPS) --trials $(if $(filter 0,$(TRIALS)),20,$(TRIALS))
+
+demo deploy:
 	@echo "make $@: not built yet"

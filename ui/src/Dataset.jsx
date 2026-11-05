@@ -56,7 +56,7 @@ function what(r) {
   return `ε ${r.epsilon / 1e6} held`;
 }
 
-export function Feed({ rows, local }) {
+export function Feed({ rows, local, onVerify }) {
   return (
     <section className="panel feed">
       <h2>Recent questions <span className="note">{local ? "this session" : "read from the contract"}</span></h2>
@@ -69,6 +69,9 @@ export function Feed({ rows, local }) {
             <span>{what(r)}</span>
             <span className="feed-buyer" title={r.buyer}>{r.buyer}</span>
             <span className="feed-time">{ago(r.created_at)}</span>
+            {r.status === "answered" || r.status === "refused" ? (
+              <button className="feed-verify" onClick={() => onVerify({ id: Number(r.id) })}>verify</button>
+            ) : <span />}
           </li>
         ))}
       </ol>
