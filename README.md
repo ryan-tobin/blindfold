@@ -1,39 +1,119 @@
 # Blindfold
 
-> Work in progress for NEAR HACKATHON (Nov 1 to Nov 14, 2026). Sections marked _TBD_ are filled in as the build lands.
+[![tests](https://github.com/ryan-tobin/blindfold/actions/workflows/tests.yml/badge.svg)](https://github.com/ryan-tobin/blindfold/actions/workflows/tests.yml)
 
 Blindfold is a private data room where AI agents pay per question for differentially private answers from encrypted data held in a TEE, with payments, limits and receipts on NEAR. **Answers, not data.**
 
-_TBD: 30-second GIF and demo video link._
+A clinic encrypts its patient records so that only one audited program, running in an Intel TDX enclave, can open them. A buyer's agent asks in plain English and pays per answer in USDC. The enclave turns the question into a fixed-format query with a private model, adds calibrated noise, refuses anything that would single out a person, and signs a receipt that is settled on NEAR. The demo data is 10,000 synthetic patients, so no real person's data is involved.
+
+- **Live UI:** https://ryan-tobin.github.io/blindfold/ (testnet by default; mainnet in the header). The testnet enclave stays running from Nov 14 through Nov 18, 2026; the mainnet one is started for demos.
+- **Demo video:** _TBD (Nov 13)_
+- **Try it locally in three commands:** [Quickstart](#quickstart), no keys and no wallet
 
 ## Tracks entered and why
 
-- **Privacy & Private AI (primary):** _TBD_
-- **Agent Economy:** _TBD_
-- **AI Security & Defense:** _TBD_
+- **Privacy & Private AI (primary):** the data never leaves the enclave unencrypted, every answer is differentially private with a public, on-chain privacy budget, and even the buyer's question stays private, planned inside the enclave by a Private TEE model on NEAR AI Cloud whose signature goes into the receipt.
+- **Agent Economy:** agents buy answers with a function-call key that can only call `request_query`, inside per-question and daily caps the human sets. USDC comes in from Base or Arbitrum through NEAR Intents, the contract escrows each fee, and the owner is paid only when the enclave settles an answer.
+- **AI Security & Defense:** an agent that tries to single out a patient is refused before it pays and again inside the enclave, and the refusal is recorded on-chain with a refund. Repeating a question returns the same noise for free, so averaging attacks don't work, and anyone can verify a receipt down to the enclave's measured code, in the browser or with `make verify`.
 
 ## Quickstart
 
-Prerequisites: Python 3.11+, Java 17+ (for Synthea), make and curl, plus [Rust](https://rustup.rs) and [cargo-near](https://github.com/near/cargo-near) 0.22 for the contract (`contract/rust-toolchain.toml` installs Rust 1.93.0 and the wasm target on first use), Docker for the simulated enclave, and Node 20+ for the browser UI.
+You need Python 3.11+ and curl. Nothing else, and no keys:
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate && pip install -e "./engine[dev]"
-make data   # downloads Synthea v4.0.0, generates 10,000 synthetic patients, builds 5 tables
-make test   # engine and contract unit tests
+make data-quick   # the 5 analytic tables, prebuilt (4 MB, SHA-256 checked)
+make demo         # plan, answer, replay, refusal and receipt check, in one run (a few seconds)
+```
+
+`make data-quick` downloads the tables `make data` builds, checked against a pinned SHA-256. To build them yourself from Synthea instead, run `make data` (needs Java 17+ and 6 to 25 minutes). You get the same rows, so every number in this README matches either way; only the DuckDB file's bytes differ between builds, so the checksum pins the published file. The data is synthetic and anyone can regenerate it from the fixed seed; a real data owner would only ever publish the encrypted bundle.
+
+Then, in the same virtualenv:
+
+```bash
+make test   # 233 engine tests + 13 agent tests, plus 19 contract tests if Rust is installed
+make bench  # accuracy on 200 benchmark questions at ε 0.1, 0.2, 0.5 and 1 (about 10 s)
+make ui     # the browser UI on http://localhost:5173 (Node 20+; ?net=local talks to make serve)
+```
+
+GitHub Actions runs these same steps on a clean Ubuntu machine on every push (`.github/workflows/tests.yml`).
+
+### More commands
+
+The other prerequisites are only for the parts that use them: Java 17+ for `make data`, [Rust](https://rustup.rs) for the contract tests (`contract/rust-toolchain.toml` installs Rust 1.93.0 and the wasm target on first use) and [cargo-near](https://github.com/near/cargo-near) 0.22 to build it, Docker for the simulated enclave, and Node 20+ for the UI.
+
+```bash
 make sql    # check the demo question and show the SQL it compiles to
 make ask    # answer the demo question with differential-privacy noise
 make serve  # start the engine's HTTP service on http://127.0.0.1:8000 (leave it running)
 make query  # in a second terminal: ask the running service, get the answer and a signed receipt
 make verify REQUEST=1  # check that receipt's signature and the enclave that signed it
-make plan   # turn the demo question, in plain English, into a QuerySpec (free; no key needed for the 5 demo questions)
-make buy BUYER=alice.testnet Q="How many patients have hypertension, by age band?"  # the buyer agent, local and unpaid
-make bench  # accuracy of 200 benchmark questions at ε 0.1, 0.2, 0.5 and 1 (about 10 s)
-make ui     # the browser UI on http://localhost:5173 (?net=local talks to make serve; default is testnet)
+make plan   # with make serve running: turn the demo question, in plain English, into a QuerySpec (free; no key needed for the 5 demo questions)
+make buy BUYER=alice.testnet Q="How many patients have hypertension, by age band?"  # with make serve running: the buyer agent, local and unpaid
 ```
 
 To run the engine in a simulated enclave instead, use Docker: `make up` (the first build compiles Phala's dstack simulator, 10–20 minutes), then the same `make query` and `make verify REQUEST=1`. Docker reads `CONTRACT_ID` from `.env`; leave it blank (or run `CONTRACT_ID= make up`) for this local run.
 
 ## What you should see
+
+`make data-quick` ends with `data/riverside.duckdb ready: the 5 tables make data builds (SHA-256 9509ce8a… checked)`.
+
+`make demo` starts the engine on a spare port with a fresh budget, runs six steps against it, and stops it. The noisy numbers and hashes change on every run; everything else should match:
+
+```text
+Engine on http://127.0.0.1:<port>: dev enclave, planner stub, privacy budget 10.0 of 10.0
+
+[1/6] Plan a question in plain English (free)
+      Q: What is the 30-day readmission rate for diabetic patients aged 65 and older, by sex?
+      -> Rate of encounter_class inpatient and readmit_30d yes among patients · encounter_class inpatient · age_band 65-79, 80+ · condition_group diabetes · by sex · ε 1
+      ε 1.0, spec hash 148530310325af34…, will refuse: no
+
+[2/6] Ask it: a noisy answer with a 95% error bar and a signed receipt
+      female                 9.0% ± 1.4
+      male                   11.6% ± 1.4
+      receipt #1, ε charged 1.0, ε left 9.0
+
+[3/6] Ask the same question again: same noise, no ε spent (no averaging attack)
+      female                 9.0% ± 1.4
+      male                   11.6% ± 1.4
+      receipt #2, replay of #1, ε charged 0.0
+
+[4/6] Try to single out one patient
+      Q: How many conditions does the 70-year-old woman in ZIP 606 who was admitted on March 3, 2026 have?
+      the plan already says it will be refused: too_fine. Send it anyway:
+      refused: rule 3 (too_fine), filter on 'admissions.admit_date': date ranges must cover at least 30 days
+      ε charged 0.0
+
+[5/6] Verify receipt #1: hash, enclave signature, attestation
+receipt 1 (answered), hash 9498ee6b3d2ba6efa7bbba31e30e26a2ed67d323193cb35282f83300ebc719d2
+✓ receipt hash matches its contents
+✓ signature valid for ed25519:DzDj2AxQfWQvrwKtsKvGy8F6W1VfgtTMZMrh3hSbthth
+! no model signature: the spec came from the offline stub or from the buyer
+✓ signer is the engine's enclave key
+✓ report_data = sha256(signer key + encryption key + schema hash)
+! enclave mode: dev (no quote: not a TEE)
+all checks passed
+
+[6/6] The public privacy budget
+      spent 1.0 of 10.0, 9.0 left
+
+Done. The engine is stopped; this run's budget and receipts were in a temp folder.
+```
+
+What each step shows:
+
+1. **Plan.** The plain-English question becomes a QuerySpec, shown in plain words with its ε, before anyone pays. Without `NEAR_AI_API_KEY` the offline stub plans the 5 demo questions; with a key it's a Private TEE model on NEAR AI Cloud.
+2. **Answer.** The true rates are 10.7% (women, 22 of 205) and 12.0% (men, 23 of 191). The answer is within the ± bar about 95% of the time, and the receipt is signed by the enclave's key.
+3. **Replay.** The same question, from another buyer, gets the stored noisy answer and costs no ε, so asking 1,000 times can't average the noise away.
+4. **Refusal.** A question that narrows in on one patient is flagged at planning and refused by the engine (rule 3, `too_fine`), at no cost.
+5. **Verify.** `verify/verify.py` recomputes the receipt hash, checks the ed25519 signature and the attestation's report_data. The two yellow `!` lines are expected locally: the stub has no model signature, and `make demo` runs in dev mode with no TDX quote. Against the real enclave the same verifier checks the Intel quote too ([Contract and enclave measurement](#contract-and-enclave-measurement)).
+6. **Budget.** One answer spent ε 1.0 of Riverside's 10.
+
+`make test` prints `233 passed` for the engine, `13 passed` for the buyer's scripts in `agent/`, then `test result: ok. 19 passed` for the contract, followed by an empty doc-test run (`0 passed`) (or a line saying the contract tests were skipped, without Rust). Before any data is downloaded or built, the engine part prints `211 passed, 22 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
+
+`make bench` prints the table under [Accuracy](#accuracy-noisy-answers-against-the-truth), digit for digit, because the benchmark's noise is seeded.
+
+### Building the data from Synthea
 
 `make data` takes about 15–25 minutes the first time: it downloads Synthea (191 MB), writes about 1.2 GB of CSVs to `data/synthea/csv/`, then builds the five analytic tables and prints their row counts. Synthea runs with a fixed seed, reference and end date, and time zone (UTC), so you should get these exact numbers on any machine, on any day:
 
@@ -45,8 +125,6 @@ Built .../data/riverside.duckdb
   medications       5,402 rows
   labs            325,355 rows
 ```
-
-`make test` then prints `233 passed` for the engine, `13 passed` for the buyer's scripts in `agent/`, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `211 passed, 22 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
 
 The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65plus_by_sex.json`: of diabetic patients aged 65+ with an inpatient stay, what share were readmitted within 30 days, by sex? It counts each patient once, at ε 1.0.
 
@@ -61,7 +139,7 @@ The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65pl
 
 `make ask TRIALS=500` (dev only) draws the noise 500 times and reports the typical error against the true values. At ε 1.0 the median error is about 0.3 percentage points and the ± bar holds the true value about 95% of the time.
 
-To see a refusal instead, run `make sql SPEC=datasets/riverside/examples/attack_one_patient.json`: it prints the refusal as JSON and exits with code 2.
+To see a refusal instead, run `make sql SPEC=datasets/riverside/examples/attack_one_patient.json`: it prints the refusal as JSON and exits with code 2, so make adds `Error 2` at the end. That is the expected result.
 
 `make serve` starts the engine as a web service. Open http://127.0.0.1:8000/docs for the interactive API docs. It has eight endpoints:
 
@@ -80,7 +158,7 @@ With the service running, `make query` (in a second terminal) sends the demo que
 
 The budget, the replay cache and the receipts live in `data/state.sqlite`, so they survive a restart. `make reset` deletes that file to start the budget again at 10.
 
-`make bench` scores the noise against the truth on 200 questions in about 10 seconds and prints the table under [Benchmark results](#accuracy-noisy-answers-against-the-truth). With the canonical data its numbers match the README exactly, because the benchmark's noise is seeded.
+`make bench` scores the noise against the truth on 200 questions in about 10 seconds and prints the table under [Accuracy](#accuracy-noisy-answers-against-the-truth). With the canonical data its numbers match the README exactly, because the benchmark's noise is seeded.
 
 ### The enclave and the chain
 
@@ -174,7 +252,7 @@ Run on Nov 4, 2026: 1 USDC sent from Base landed as 0.999798 USDC in `ryan-tobin
 
 ### The browser UI
 
-`make ui` starts the UI (`ui/`, React and Vite, plain CSS and hand-drawn SVG, no component library) on http://localhost:5173. The dropdown in the header picks the network: `testnet` (the default), `mainnet`, or `local` for `make serve` with nothing paid.
+The UI is hosted at https://ryan-tobin.github.io/blindfold/, built from `ui/` by `.github/workflows/pages.yml` on every push. `make ui` runs the same UI (`ui/`, React and Vite, plain CSS and hand-drawn SVG, no component library) on http://localhost:5173. The dropdown in the header picks the network: `testnet` (the default), `mainnet`, or `local` for `make serve` with nothing paid.
 
 - **Dataset card.** Riverside's title, source, price and owner, whether the engine is online in a TDX enclave, and whether the `schema.json` the UI shows hashes to the `schema_hash` on-chain.
 - **Privacy meter.** A ring from ε 10 down to 0, read from the contract's `get_dataset`, with ε held by questions being answered shown in amber. It drops as answers settle.
@@ -187,11 +265,50 @@ Run on Nov 4, 2026: 1 USDC sent from Base landed as 0.999798 USDC in `ryan-tobin
 
 The UI reads the chain with plain JSON-RPC view calls to FastNEAR's public RPC and talks to the engine over HTTPS. The engine allows any origin to read its replies (CORS), since every endpoint is public and nothing uses cookies. Depositing and setting caps stay in `agent/wallet.py` for now. Run on Nov 4, 2026 in local mode, the demo question came back as women 9.8% ± 1.3, men 11.6% ± 1.4, and the hypertension count by age band as ± 6 per band.
 
-_TBD: expected output for each demo step._
-
 ## Architecture and data flow
 
-_TBD_
+```mermaid
+flowchart LR
+  subgraph Owner["Data owner (Riverside Clinic)"]
+    O1["make data: Synthea → 5 tables"] --> O2["make bundle: seal to the enclave's X25519 key"]
+  end
+  subgraph Buyer["Buyer"]
+    H["Human: wallet.py or the UI<br>deposit USDC, set caps"]
+    A["Agent: buyer.py<br>function-call key, request_query only"]
+  end
+  subgraph TEE["Intel TDX enclave (Phala Cloud)"]
+    E["engine: /plan → spec.py → compile.py → dp.py → budget.py → receipts.py"]
+    K["dstack keys: ed25519 signer + X25519<br>report_data = sha256(keys + schema hash)"]
+  end
+  M["NEAR AI Cloud<br>Private TEE model"]
+  C[("NEAR contract<br>blindfold.ryan-tobin.near<br>price · ε budget · escrow · receipts")]
+  I["NEAR Intents 1Click<br>USDC from Base / Arbitrum"]
+  V["Verifier: make verify or the UI's Verify tab"]
+
+  O2 -- "encrypted bundle (GitHub release)" --> E
+  O2 -- "bundle hash" --> C
+  I -- USDC --> H
+  H -- "deposit, set_limits" --> C
+  A -- "1 · POST /plan (free)" --> E
+  E -- "question + schema, attested and signed" --> M
+  A -- "2 · request_query: escrow the fee" --> C
+  A -- "3 · POST /query" --> E
+  E -- "4 · settle(receipt hash, ε): pay owner or refund" --> C
+  E -- "answer + signed receipt" --> A
+  K --- E
+  V -- "quote, event log, compose hash" --> E
+  V -- "registered enclave, settled receipt" --> C
+```
+
+1. **List.** The owner builds the five tables, checks the enclave's attestation, and encrypts them to the enclave's key (`owner/encrypt.py`). The ciphertext goes to a public GitHub release and its SHA-256 onto the contract. The enclave only loads a bundle whose hash the contract lists, and keeps it in memory.
+2. **Fund.** The buyer brings USDC to NEAR from another chain with NEAR Intents (`agent/fund.py`), deposits it into the contract, sets a per-question and a daily cap, and gives the agent a key that can only call `request_query` (`agent/wallet.py`).
+3. **Plan.** The agent sends the question to `/plan` inside the enclave. The enclave asks a Private TEE model on NEAR AI Cloud for a QuerySpec, checks the model's attestation and signature, and validates the spec against the public schema. Free.
+4. **Pay.** The agent calls `request_query(dataset, spec_hash, ε)`. The contract checks the caps, the balance and the privacy budget, and escrows the fee.
+5. **Answer.** The agent sends the spec and request id to `/query`. The engine checks the spec matches what was paid for, applies the refusal rules and the per-patient caps, runs it on DuckDB, adds discrete Laplace noise, suppresses small cells, and signs a receipt.
+6. **Settle.** The enclave's own NEAR account calls `settle` with the receipt hash. An answer pays the owner and spends ε on-chain; a refusal refunds the buyer. A question nobody settles can be expired for a refund.
+7. **Verify.** Anyone can check a receipt: its signature, that the signing key is bound into a genuine Intel TDX quote, that the quote's compose hash is this repo's `docker-compose.tee.yml` with the engine image pinned by digest, and that the contract registered that enclave and settled that exact receipt hash.
+
+Where the code is: `engine/` runs in the enclave (FastAPI service, DP engine, keys, chain client), `contract/` is the NEAR contract (Rust, near-sdk-rs), `agent/` and `owner/` are scripts for the buyer and the data owner, `verify/` is the verifier, `ui/` is the browser UI, and `scripts/` builds the data and runs `make demo`.
 
 ## Privacy guarantees and how each is enforced
 
@@ -232,14 +349,14 @@ On the Day 8 prompt, none of the 15 attack questions (5 per model) got an answer
 
 ### Accuracy: noisy answers against the truth
 
-`make bench` (`engine/blindfold/bench.py`) builds 200 questions, 25 question shapes for each of the 8 condition groups: counts (overall, by sex, by age band, by ZIP3, 65+ by sex, sex by age band, 65+ on a statin), readmission rates per patient and per stay, the share of emergency visits, mean and total hospital days, drug classes (overall, by sex, 65+), and the mean HbA1c, LDL, systolic blood pressure and BMI (overall and by sex). It computes each true answer on the raw tables, outside any enclave, and writes them to `datasets/riverside/benchmark.jsonl`. Then, at each ε, it answers every question 20 times with the enclave's own noise code (`dp.answer`), charging no budget. Every cell a buyer would see is scored by its relative error, |noisy − true| / true, and by whether the truth is inside its 95% error bar. Cells under 20 people are shown as `<20`, so they aren't scored. The benchmark seeds its random generator (seed 0) so the numbers reproduce exactly; the enclave itself draws noise from the OS's secure random source. Run on Nov 5, 2026:
+`make bench` (`engine/blindfold/bench.py`) builds 200 questions, 25 question shapes for each of the 8 condition groups: counts (overall, by sex, by age band, by ZIP3, 65+ by sex, sex by age band, 65+ on a statin), readmission rates per patient and per stay, the share of emergency visits, mean and total hospital days, drug classes (overall, by sex, 65+), and the mean HbA1c, LDL, systolic blood pressure and BMI (overall and by sex). It computes each true answer on the raw tables, outside any enclave, and writes them to `datasets/riverside/benchmark.jsonl`. Then, at each ε, it answers every question 20 times with the enclave's own noise code (`dp.answer`), charging no budget. Every cell a buyer would see is scored by its relative error, |noisy − true| / true, and by whether the truth is inside its 95% error bar. Cells under 20 people are shown as `<20`, so they aren't scored. True answers are rounded to 10 significant digits, because DuckDB's parallel sums can differ in the last digit between runs, so `make bench` rewrites `benchmark.jsonl` and `docs/bench.json` byte for byte. The benchmark seeds its random generator (seed 0) so the numbers reproduce exactly; the enclave itself draws noise from the OS's secure random source. Run on Nov 5, 2026:
 
 | ε | Median error | 90% of cells within | Questions within 10% | Truth inside the 95% bar | Cells suppressed |
 | --- | --- | --- | --- | --- | --- |
-| 0.1 | 12.9% | 281% | 36% | 95.1% | 40.5% |
-| 0.2 | **5.8%** | 100% | 52% | 94.8% | 43.0% |
-| 0.5 | 2.3% | 38% | 66% | 96.0% | 45.2% |
-| 1 | 1.0% | 15% | 73% | 95.6% | 46.4% |
+| 0.1 | 12.9% | 280.7% | 36% | 95.1% | 40.5% |
+| 0.2 | **5.8%** | 100.0% | 52% | 94.8% | 43.0% |
+| 0.5 | 2.3% | 38.4% | 66% | 96.0% | 45.2% |
+| 1 | 1.0% | 14.6% | 73% | 95.6% | 46.4% |
 
 Median error by measure:
 
@@ -261,7 +378,7 @@ The full per-question results are in `data/bench.json`, and the UI's Accuracy ta
 
 ## Tests
 
-`make test` runs the unit tests:
+`make test` runs the unit tests. GitHub Actions (`.github/workflows/tests.yml`) runs the whole Quickstart on a clean Ubuntu machine on every push: install, `make data-quick`, `make test` (all three suites), `make demo` and `make bench`, and builds the UI.
 
 - `engine/tests/test_load.py` (30): table schemas, identifier removal, `readmit_30d`, category values and lab bounds.
 - `engine/tests/test_spec.py` (45): valid QuerySpecs pass and normalise to one canonical form; 33 bad specs are each refused with the right rule and reason.
@@ -359,6 +476,8 @@ _Kept up to date as the build goes._
 | [Phala Cloud](https://phala.com/) with dstack 0.5.12 | Runs the real enclave: the TDX VM, its OS image and its key service (KMS) | service; dstack is Apache 2.0 |
 | GitHub Actions (`actions/checkout`, `docker/*-action`, `actions/attest-build-provenance`) | Builds and signs the engine image | MIT or Apache 2.0 |
 | [pytest](https://pytest.org/) | Tests | MIT |
+| GitHub Actions (`actions/setup-python`, `actions/setup-node`, `actions/upload-pages-artifact`, `actions/deploy-pages`) | Runs the Quickstart on every push and publishes the UI to GitHub Pages | MIT |
+| [Mermaid](https://mermaid.js.org/) (rendered by GitHub) | The architecture diagram in this README | MIT |
 | [near-sdk-rs](https://github.com/near/near-sdk-rs) 5.29.1 | The NEAR contract | MIT or Apache 2.0 |
 | [cargo-near](https://github.com/near/cargo-near) 0.22.0 | Builds the contract; project layout from `cargo near new` | MIT or Apache 2.0 |
 | [near-cli-rs](https://github.com/near/near-cli-rs) 0.30.1 | Creates accounts, deploys, and signs calls from `owner/register.py` | MIT or Apache 2.0 |
@@ -374,6 +493,8 @@ _Kept up to date as the build goes._
 ## Known limits and what's next
 
 - All data is synthetic (Synthea). No real person's data is used, even for testing.
+- `make data-quick` downloads the plaintext tables from a GitHub release so a fresh clone runs in seconds. That is only fine because the data is synthetic and `make data` rebuilds the same file from a fixed seed; a real owner publishes only the encrypted bundle.
+- `make demo` runs the engine in dev mode (a local key, no TDX quote) with the offline planner stub. The real enclave, NEAR AI planner and payments are shown on testnet and mainnet (see Contract and enclave measurement).
 - Synthea has no ZIP code for some towns; those patients get `zip3 = "unknown"`.
 - Contribution caps trade accuracy for privacy: a patient with more than 5 matching admissions or lab results counts only 5 (a fixed pseudo-random pick), so totals over heavy users are lower than the raw data. The benchmark measures this.
 - Depression and heart failure are rare in Synthea's living population (well under 1% of patients), so most questions about them will be suppressed as small cells.
@@ -387,7 +508,7 @@ _Kept up to date as the build goes._
 - The benchmark measures the noise and the contribution caps, against the truth on the same tables. It doesn't measure the planner; `make plan-bench` does that.
 - The browser's Verify tab doesn't check Intel's signature on the quote or NEAR AI's signature on the plan; `make verify` does both. A receipt from before an upgrade names its own compose hash, so the "registered compose hash" check is red for it, by design.
 - The UI has no automated tests; its wallet flow is checked by hand. Its receipt hashing and enclave checks were compared against the Python verifier on a made-up quote and on the live testnet enclave. Deposits and caps are set with `agent/wallet.py`, not in the UI yet.
-- Both enclaves are started only for demos, to keep the cost down (about $0.06 an hour each). While one is stopped, its contract still takes questions, and `expire` refunds any that nobody settles.
+- To keep the cost down (about $0.06 an hour each), the testnet enclave runs from Nov 14 through Nov 18, 2026 for judging, and the mainnet one is started only for demos. While one is stopped, its contract still takes questions, and `expire` refunds any that nobody settles.
 - NEAR Intents has no testnet, so `agent/fund.py` only runs on mainnet with real money. On testnet the USDC comes from Circle's faucet.
 - Trust model: the contract doesn't check the Intel TDX quote itself, which is too heavy for a contract. It trusts one registered enclave account, whose key exists only inside the enclave, and stores the quote hash so anyone can check it off-chain.
 - Trust in Phala: the enclave's keys come from Phala's key service (KMS), which only releases them to a VM whose quote and compose hash it accepts, and the OS image is dstack's. The verifier checks the OS image hash is in the quote but doesn't rebuild the image. A KMS run on-chain (dstack supports one on Base) would remove that trust.

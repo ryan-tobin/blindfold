@@ -18,8 +18,10 @@ Q?= What is the 30-day readmission rate for diabetic patients aged 65 and older,
 MODELS ?=
 GOAL ?=
 EPS ?= 0.1,0.2,0.5,1
+DATA_URL ?= https://github.com/ryan-tobin/blindfold/releases/download/riverside-data-v1/riverside.duckdb
+DATA_SHA256 ?= 9509ce8ae957b677399716ca41f4c47881e0f80daa1bb70ade9e3ef1a0ce8bc6
 
-.PHONY: help data test sql ask serve query reset contract register up register-enclave pay verify demo bench deploy bundle buy ui
+.PHONY: help data test sql ask serve query reset contract register up register-enclave pay verify demo bench bundle buy ui data-quick
 
 help:
 	@echo "make data    generate 10,000 Synthea patients and build the 5 analytic tables"
@@ -44,16 +46,25 @@ help:
 	@echo "make plan-bench	score the planner on the 25 test questions (MODELS=a,b or MODELS=stub)"
 	@echo "make buy		the buyer agent: plan, pay with its function-call key, answer, report (BUYER=... Q=... or GOAL=...)"
 	@echo "make ui		the browser UI on http://localhost:5173 (needs Node 20+)"
-
+	@echo "make data-quick  download the same tables, prebuilt (4 MB, checked by SHA-256)"
+	@echo "make demo    the whole local flow in one command: plan, answer, replay, refusal, verify"
 
 data:
 	bash scripts/generate_data.sh
 	cd engine && $(PYTHON) -m blindfold.load
 
+data-quick:
+	mkdir -p data
+	curl -fsSL --retry 3 -o data/riverside.duckdb.part $(DATA_URL)
+	$(PYTHON) -c "import hashlib,sys; h=hashlib.sha256(open('data/riverside.duckdb.part','rb').read()).hexdigest(); sys.exit(0 if h=='$(DATA_SHA256)' else 'SHA-256 mismatch: '+h)"
+	mv data/riverside.duckdb.part data/riverside.duckdb
+	@echo "data/riverside.duckdb ready: the 5 tables make data builds (SHA-256 $(DATA_SHA256) checked)"
+
 test:
 	cd engine && $(PYTHON) -m pytest -q
 	$(PYTHON) -m pytest -q agent/tests
-	cd contract && cargo test -q
+	@if command -v cargo >/dev/null; then cd contract && cargo test -q; \
+	else echo "cargo not found: skipped the 19 contract tests (install Rust: https://rustup.rs)"; fi
 
 sql:
 	cd engine && $(PYTHON) -m blindfold.compile $(abspath $(SPEC)) --run
@@ -112,5 +123,5 @@ ui:
 bench:
 	cd engine && $(PYTHON) -m blindfold.bench --eps $(EPS) --trials $(if $(filter 0,$(TRIALS)),20,$(TRIALS))
 
-demo deploy:
-	@echo "make $@: not built yet"
+demo:
+	$(PYTHON) scripts/demo.py

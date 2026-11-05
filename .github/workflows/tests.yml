@@ -1,0 +1,30 @@
+# Runs the README Quickstart on a clean machine on every push:
+# install, download the prebuilt tables, make test, make demo, make bench.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quickstart:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m venv .venv && . .venv/bin/activate && pip install -e "./engine[dev]"
+      - run: . .venv/bin/activate && make data-quick
+      - run: . .venv/bin/activate && make test
+      - run: . .venv/bin/activate && make demo
+      - run: . .venv/bin/activate && make bench
+  ui:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci && npm run build
+        working-directory: ui

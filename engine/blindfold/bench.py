@@ -109,6 +109,15 @@ def questions(schema: dict) -> list[dict]:
             out.append({"id": len(out), "question": text, "spec": spec})
     return out
 
+def tidy(x, digits: int):
+    """Round floats to `digits` significant digits (also inside lists and dicts), so files don't change between runs."""
+    if isinstance(x, float):
+        return float(f"{x:.{digits}g}")
+    if isinstance(x, dict):
+        return {k: tidy(v, digits) for k, v in x.items()}
+    if isinstance(x, list):
+        return [tidy(v, digits) for v in x]
+    return x
 
 def build(con, schema: dict) -> list[dict]:
     """The questions with their true answers, written to BENCHMARK."""
@@ -116,7 +125,7 @@ def build(con, schema: dict) -> list[dict]:
     with open(BENCHMARK, "w", encoding="utf-8") as f:
         for q in items:
             cq = compile_spec(validate(q["spec"], schema))
-            q["truth"] = [{"cell": r["cell"], "value": true_value(cq, r)} for r in run(con, cq)]
+            q["truth"] = [{"cell": r["cell"], "value": tidy(true_value(cq, r), 10)} for r in run(con, cq)]
             f.write(json.dumps(q, ensure_ascii=False, sort_keys=True) + "\n")
     return items
 
@@ -186,11 +195,11 @@ def main() -> None:
     print("≤10% (q): questions whose typical cell is within 10%; inside ±: truth inside the 95% error bar")
 
     FULL.parent.mkdir(exist_ok=True)
-    FULL.write_text(json.dumps({"questions": [q["question"] for q in items], "results": results}, indent=1))
+    FULL.write_text(json.dumps(tidy({"questions": [q["question"] for q in items], "results": results}, 8), indent=1))
     summary = {"questions": len(items), "trials": a.trials, "seed": a.seed,
                "results": [{k: v for k, v in r.items() if k != "per_question"} for r in results]}
     SUMMARY.parent.mkdir(exist_ok=True)
-    SUMMARY.write_text(json.dumps(summary, indent=2) + "\n")
+    SUMMARY.write_text(json.dumps(tidy(summary, 8), indent=2) + "\n")
     print(f"\nwrote {SUMMARY.relative_to(load.REPO_ROOT)} and {FULL.relative_to(load.REPO_ROOT)}")
 
 
