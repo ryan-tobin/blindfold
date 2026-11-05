@@ -27,6 +27,7 @@ make query  # in a second terminal: ask the running service, get the answer and 
 make verify REQUEST=1  # check that receipt's signature and the enclave that signed it
 make plan   # turn the demo question, in plain English, into a QuerySpec (free; no key needed for the 5 demo questions)
 make buy BUYER=alice.testnet Q="How many patients have hypertension, by age band?"  # the buyer agent, local and unpaid
+make bench  # accuracy of 200 benchmark questions at ε 0.1, 0.2, 0.5 and 1 (about 10 s)
 make ui     # the browser UI on http://localhost:5173 (?net=local talks to make serve; default is testnet)
 ```
 
@@ -45,7 +46,7 @@ Built .../data/riverside.duckdb
   labs            325,355 rows
 ```
 
-`make test` then prints `230 passed` for the engine, `13 passed` for the buyer's scripts in `agent/`, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `209 passed, 21 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
+`make test` then prints `233 passed` for the engine, `13 passed` for the buyer's scripts in `agent/`, then `test result: ok. 19 passed` for the contract. Before `make data` the engine part prints `211 passed, 22 skipped`, because the checks on the real tables need the database. The first contract run downloads Rust 1.93.0 and the crates, so it takes a few minutes.
 
 The demo question is `datasets/riverside/examples/readmit_patients_diabetes_65plus_by_sex.json`: of diabetic patients aged 65+ with an inpatient stay, what share were readmitted within 30 days, by sex? It counts each patient once, at ε 1.0.
 
@@ -78,6 +79,8 @@ To see a refusal instead, run `make sql SPEC=datasets/riverside/examples/attack_
 With the service running, `make query` (in a second terminal) sends the demo question as `alice.testnet` and prints the answer and its receipt. The receipt shows `"epsilon_charged": 1.0` and `"epsilon_remaining": 9.0`. Run `make query` again and you get the exact same numbers back, with `"replay_of": 1` and `"epsilon_charged": 0.0`: a repeated question costs nothing and can't be averaged. `make query SPEC=datasets/riverside/examples/attack_one_patient.json` is refused (`too_fine`) and costs nothing. Every receipt is signed by the enclave's ed25519 key. `make verify REQUEST=1` checks it: the receipt hash, the signature, that the key is the engine's, and that the attestation binds the keys to the schema. Without Docker the engine runs in **dev** mode (a local key in `data/dev_enclave.key`, no quote), and the verifier marks it in yellow.
 
 The budget, the replay cache and the receipts live in `data/state.sqlite`, so they survive a restart. `make reset` deletes that file to start the budget again at 10.
+
+`make bench` scores the noise against the truth on 200 questions in about 10 seconds and prints the table under [Benchmark results](#accuracy-noisy-answers-against-the-truth). With the canonical data its numbers match the README exactly, because the benchmark's noise is seeded.
 
 ### The enclave and the chain
 
@@ -175,7 +178,11 @@ Run on Nov 4, 2026: 1 USDC sent from Base landed as 0.999798 USDC in `ryan-tobin
 
 - **Dataset card.** Riverside's title, source, price and owner, whether the engine is online in a TDX enclave, and whether the `schema.json` the UI shows hashes to the `schema_hash` on-chain.
 - **Privacy meter.** A ring from ε 10 down to 0, read from the contract's `get_dataset`, with ε held by questions being answered shown in amber. It drops as answers settle.
-- **Ask.** Type a question or pick a demo one, then **Plan it (free)** shows the QuerySpec in plain words, its ε, its price, and which TEE model planned it. **Pay and ask** has the buyer's NEAR wallet (connected with [NEAR Connect](https://github.com/hot-dao/near-selector), for example Meteor Wallet) sign `request_query`. The engine then answers and settles, and the UI draws the answer as bars with 95% error bars, plus the receipt hash and links to the payment and settlement transactions. Before paying, it runs the same checks as the contract (balance, both caps, budget left) and explains why it won't pay if one fails. A question the engine would refuse can't be paid for.
+- **Ask.** Type a question or pick a demo one, then **Plan it (free)** shows the QuerySpec in plain words, its ε, its price, and which TEE model planned it. **Pay and ask** has the buyer's NEAR wallet (connected with [NEAR Connect](https://github.com/hot-dao/near-selector), for example Meteor Wallet) sign `request_query`. The engine then answers and settles, and the UI draws the answer as bars with 95% error bars, plus the receipt hash and links to the payment and settlement transactions. Before paying, it runs the same checks as the contract (balance, both caps, budget left) and explains why it won't pay if one fails. A question the engine would refuse can't be paid for, except in attack mode. **Verify this receipt** under the answer opens the Verify tab on it.
+- **Attack mode.** A toggle on the Ask panel loads the "find this patient" question (a 70-year-old woman in ZIP 606 admitted on March 3) with its plan already made, since the planner can take over a minute on it. The plan is the planner's own spec for that question at ε 0.5 (`stub_spec` in `planner_questions.json`), hashed in the browser the way the engine hashes it. It is marked as one the engine will refuse (`too_fine`: a single admit date, where date ranges must cover at least 30 days). **Pay and try it** pays anyway, so the enclave signs the refusal, settles it on-chain, and the contract refunds the fee. Both show in the feed.
+- **Verify.** Type a request id, or press **verify** on a feed row. The browser fetches the receipt and the enclave's `/attestation` and checks them itself, in three groups. *Signed by the enclave:* the receipt hash recomputed from canonical JSON, the ed25519 signature (WebCrypto), the signer is the attested key, and, for a question this browser asked, the answer is the one that was signed. *Running the registered code:* report_data binds the keys and the schema, the TDX quote carries it, the event log's RTMR3 digests and a replay of RTMR0–3 match the quote, the compose hash in the quote is the hash of `app_compose`, the deployed compose file is this repo's, and it is the compose hash registered on the contract and named in the receipt. *Recorded on NEAR:* the request settled with this receipt hash and status, the signer is the registered enclave, and the ε charged (or the refusal and its refund). Intel's signature over the quote needs Intel's collateral, and NEAR AI's signature needs secp256k1, so `make verify` checks those two (`ui/src/verify.js`, `ui/src/canon.js`).
+- **Owner.** Each listing as the contract has it: owner, price, budget left and held, answered, refused and expired counts and earnings over the last 100 questions, the owner's withdrawable balance, and the schema and bundle hashes. With the owner's wallet connected it can set the price, pause or reopen new questions, and withdraw. **List a new dataset** calls `register_dataset`, with the schema hash defaulting to Riverside's `schema.json`; `make bundle` then gives the bundle hash to set.
+- **Accuracy.** The `make bench` results from `docs/bench.json`: median error, the share of questions within 10%, and how often the 95% error bar holds the truth, for each ε, with a bar chart and a table by measure.
 - **Feed.** The last 15 questions from the contract's `list_recent`, answered, refused (with the rule, refunded), pending or expired, refreshed every 8 seconds.
 
 The UI reads the chain with plain JSON-RPC view calls to FastNEAR's public RPC and talks to the engine over HTTPS. The engine allows any origin to read its replies (CORS), since every endpoint is public and nothing uses cookies. Depositing and setting caps stay in `agent/wallet.py` for now. Run on Nov 4, 2026 in local mode, the demo question came back as women 9.8% ± 1.3, men 11.6% ± 1.4, and the hypertension count by age band as ± 6 per band.
@@ -223,7 +230,34 @@ With the current prompt, `z-ai/glm-5.3-flash` planned 4 of the 5 readmission que
 
 On the Day 8 prompt, none of the 15 attack questions (5 per model) got an answer: the model refused 9 as asking about one person, and the engine refused 6 as `too_fine`. On the current prompt, the 5 attack questions were refused 2 times by the model and 3 times by the engine. `z-ai/glm-5.3` was not tested because its attestation didn't echo our nonce, so the engine won't use it.
 
-_TBD: accuracy vs ε from `make bench` (Day 11)._
+### Accuracy: noisy answers against the truth
+
+`make bench` (`engine/blindfold/bench.py`) builds 200 questions, 25 question shapes for each of the 8 condition groups: counts (overall, by sex, by age band, by ZIP3, 65+ by sex, sex by age band, 65+ on a statin), readmission rates per patient and per stay, the share of emergency visits, mean and total hospital days, drug classes (overall, by sex, 65+), and the mean HbA1c, LDL, systolic blood pressure and BMI (overall and by sex). It computes each true answer on the raw tables, outside any enclave, and writes them to `datasets/riverside/benchmark.jsonl`. Then, at each ε, it answers every question 20 times with the enclave's own noise code (`dp.answer`), charging no budget. Every cell a buyer would see is scored by its relative error, |noisy − true| / true, and by whether the truth is inside its 95% error bar. Cells under 20 people are shown as `<20`, so they aren't scored. The benchmark seeds its random generator (seed 0) so the numbers reproduce exactly; the enclave itself draws noise from the OS's secure random source. Run on Nov 5, 2026:
+
+| ε | Median error | 90% of cells within | Questions within 10% | Truth inside the 95% bar | Cells suppressed |
+| --- | --- | --- | --- | --- | --- |
+| 0.1 | 12.9% | 281% | 36% | 95.1% | 40.5% |
+| 0.2 | **5.8%** | 100% | 52% | 94.8% | 43.0% |
+| 0.5 | 2.3% | 38% | 66% | 96.0% | 45.2% |
+| 1 | 1.0% | 15% | 73% | 95.6% | 46.4% |
+
+Median error by measure:
+
+| ε | count | histogram | mean | rate | sum |
+| --- | --- | --- | --- | --- | --- |
+| 0.1 | 7.0% | 25.2% | 13.1% | 24.4% | 77.5% |
+| 0.2 | 3.1% | 11.7% | 7.3% | 12.0% | 44.6% |
+| 0.5 | 0.9% | 3.7% | 3.6% | 4.5% | 18.1% |
+| 1 | 0.2% | 1.8% | 1.8% | 2.2% | 8.9% |
+
+What the numbers say:
+
+- At ε 0.2, half of all answers land within 5.8% of the truth. At ε 1.0, the default for rates and means, half land within 1%.
+- The 95% error bars are honest: the truth falls inside them 95% to 96% of the time at every ε. A buyer can take the ± at face value.
+- The tail is small groups. A cell of 25 people with ± 30 noise is shown, and its relative error is large; the 90th-percentile column is mostly those cells. The ZIP3 and age-band shapes split rare conditions into many small cells, which is also why about 43% of cells are suppressed.
+- Sums are the noisiest measure, since one patient can move a total by up to 150 hospital days (5 stays × 30 days). Means and rates over the same rows are far tighter.
+
+The full per-question results are in `data/bench.json`, and the UI's Accuracy tab charts `docs/bench.json`. `make bench EPS=0.2 TRIALS=100` runs other settings.
 
 ## Tests
 
@@ -240,6 +274,7 @@ _TBD: accuracy vs ε from `make bench` (Day 11)._
 - `engine/tests/test_bundle.py` (10): bundle round trip with every row and type intact, no file access after loading, fresh ciphertext that reveals nothing, the wrong hash, key, schema or archive entries refused, an engine that starts without data and loads the bundle later, chain mode loading only the listed bundle, and the real tables.
 - `engine/tests/test_attest.py` (11): a made-up TDX quote and event log: every check passes, the compose file named in the label, dstack's digest formula, digests computed when dstack leaves them empty, a forged event log, a different compose file, keys not in the quote, operator env vars, the NEAR AI key as the one allowed secret, and simulated or dev enclaves shown as warnings.
 - `engine/tests/test_planner.py` (18): the planner against a fake NEAR AI server that signs with a real secp256k1 key: a checked plan end to end, one retry for bad JSON, rephrase after two failures, privacy refusals never retried, model refusals, a missing nonce, the wrong signer, a signature over other bytes, a late signature, prompt examples kept apart from the test questions, the planner's ε defaults, per-patient readmission rates in the prompt, the stub, `/plan`, its rate limit, and the model signature in the receipt.
+- `engine/tests/test_bench.py` (3): the 200 benchmark questions are valid, distinct and cover every measure, and a short scoring run on the real tables.
 - `engine/tests/test_ethsig.py` (4): keccak-256 and Ethereum signature recovery against values from eth-account.
 - `agent/tests/test_agent.py` (13): USDC and NEAR amounts to and from text, agent keys that are refused (full access, the wrong contract, other methods, not on the account), the pre-payment checks for each cap, the balance and the budget, the 1Click quote body, and the report.
 - `contract/src/tests.rs` (19): answered questions pay the owner and spend ε; refusals refund and cost nothing; a free replay; only the enclave settles, once, and never for more ε than requested; per-question and daily caps and the daily reset; an agent key can't raise its caps; pending questions reserve the budget; closed datasets; owner-only updates; expiry refunds; USDC-only deposits; unique dataset ids; the recent-queries feed.
@@ -349,7 +384,9 @@ _Kept up to date as the build goes._
 - Without `CONTRACT_ID` the engine runs in local mode: the buyer in `/query` is a name the caller types and nobody pays. With a contract, buyers pay in USDC from a prepaid balance (see Payments and the buyer agent).
 - The agent's key is only as safe as the file it lives in (`~/.blindfold/agent-keys`, chmod 600). Whoever holds it can spend up to the caps, and burn its NEAR gas allowance, until the buyer runs `revoke-agent`.
 - Planned questions now default to ε 1.0 (rates, means) or 0.5 (counts, sums, histograms), for usable error bars. That spends Riverside's budget of 10 in about 10 to 20 new questions; a real owner would set a larger budget or a lower default.
-- The UI has no automated tests; its wallet flow is checked by hand. Deposits and caps are set with `agent/wallet.py`, not in the UI yet.
+- The benchmark measures the noise and the contribution caps, against the truth on the same tables. It doesn't measure the planner; `make plan-bench` does that.
+- The browser's Verify tab doesn't check Intel's signature on the quote or NEAR AI's signature on the plan; `make verify` does both. A receipt from before an upgrade names its own compose hash, so the "registered compose hash" check is red for it, by design.
+- The UI has no automated tests; its wallet flow is checked by hand. Its receipt hashing and enclave checks were compared against the Python verifier on a made-up quote and on the live testnet enclave. Deposits and caps are set with `agent/wallet.py`, not in the UI yet.
 - Both enclaves are started only for demos, to keep the cost down (about $0.06 an hour each). While one is stopped, its contract still takes questions, and `expire` refunds any that nobody settles.
 - NEAR Intents has no testnet, so `agent/fund.py` only runs on mainnet with real money. On testnet the USDC comes from Circle's faucet.
 - Trust model: the contract doesn't check the Intel TDX quote itself, which is too heavy for a contract. It trusts one registered enclave account, whose key exists only inside the enclave, and stores the quote hash so anyone can check it off-chain.
