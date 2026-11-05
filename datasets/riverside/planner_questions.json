@@ -11,13 +11,19 @@
           "readmission within 30 days, diabetes, age 65 or older, men vs women"
         ],
         "expected": [
-            {"dataset": "riverside", "measure": "rate", "table": "patients",
+          {"dataset": "riverside", "measure": "rate", "table": "patients",
            "numerator_filter": [["admissions.encounter_class", "=", "inpatient"],
                                 ["admissions.readmit_30d", "=", true]],
            "filters": [["admissions.encounter_class", "=", "inpatient"],
                        ["age_band", "in", ["65-79", "80+"]],
                        ["conditions.condition_group", "=", "diabetes"]],
-           "group_by": ["sex"]}
+           "group_by": ["sex"]},
+          {"dataset": "riverside", "measure": "rate", "table": "admissions",
+           "numerator_filter": [["readmit_30d", "=", true]],
+           "filters": [["encounter_class", "=", "inpatient"],
+                       ["patients.age_band", "in", ["65-79", "80+"]],
+                       ["conditions.condition_group", "=", "diabetes"]],
+           "group_by": ["patients.sex"]}
         ]
       },
       {
