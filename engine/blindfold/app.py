@@ -18,12 +18,20 @@ Two ways to run:
   contract, then POSTs {"request_id": 7, "spec": {...}}. The engine reads the
   request on-chain, checks the spec is the one paid for, answers, and calls
   settle with the receipt hash. The budget is the larger of the contract's
-  epsilon_spent and the local ledger.
+  epsilon_spent and the local ledger, out of the smaller of the contract's
+  epsilon_total and BLINDFOLD_EPSILON_TOTAL (so a lying RPC can't raise it).
+
+In chain mode the spec is the proof of purchase: only the buyer knows the spec
+behind the paid spec_hash (the chain shows just the hash). A /query whose spec
+doesn't hash to it is turned away with 409 and changes nothing, so a stranger
+can't read someone's answer or use up their request. An answer is only handed
+out once its request is settled as answered on-chain.
 
 Planning (POST /plan) is free and charges no budget. With NEAR_AI_API_KEY set
 the question goes to a Private TEE model on NEAR AI Cloud (planner.py); without
 it, the offline stub knows the 5 demo questions (planner_stub.py). When /query
-runs a spec that /plan produced, the receipt carries the model's signature.
+sends the plan_id that /plan returned (and the same spec), the receipt carries
+the model's signature.
 
 
 Every /query gets a signed receipt, answered or refused. The checks run in order:
@@ -40,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import threading
 import time
 from collections import OrderedDict, deque
@@ -99,13 +108,13 @@ class Blindfold:
             if d["schema_hash"] != self.schema_hash:
                 raise SystemExit(f"schema.json hashes to {self.schema_hash}, but {chain.contract_id} "
                                  f"lists {self.dataset} with {d['schema_hash']}")
-            self.total = from_millionths(d["epsilon_total"])
+            self.total = min(from_millionths(d["epsilon_total"]), self.total)
         self.state = State(state_path)
         self.planner = planner or StubPlanner(self.schema)
         self.plan_limit = plan_limit_per_hour
         self.plan_times: deque[float] = deque()
         self.plan_lock = threading.Lock()
-        self.plans: OrderedDict[str, dict] = OrderedDict()  # never the question text: only signatures
+        self.plans: OrderedDict[str, tuple[str, dict]] = OrderedDict()  # plan_id -> (spec_hash, signature)
         self.clock = clock
         self.lock = threading.Lock()  # one query at a time: check, charge, cache and settle together
         self.bundle_url, self.bundle_hash = bundle_url, bundle_hash
@@ -224,10 +233,12 @@ class Blindfold:
         except OSError as e:
             raise EngineError(502, f"couldn't reach NEAR AI Cloud: {e}") from e
         out = plan.to_dict()
+        out["plan_id"] = None
         if plan.model_signature and out["spec_hash"]:
+            # only whoever holds this plan_id can put the signature in a receipt
+            out["plan_id"] = secrets.token_hex(16)
             with self.plan_lock:
-                self.plans[out["spec_hash"]] = plan.model_signature
-                self.plans.move_to_end(out["spec_hash"])
+                self.plans[out["plan_id"]] = (out["spec_hash"], plan.model_signature)
                 while len(self.plans) > KEEP_PLANS:
                     self.plans.popitem(last=False)
         price = self.chain.dataset(self.dataset)["price"] if self.chain else None
@@ -235,28 +246,92 @@ class Blindfold:
         return out
 
 
-    def query(self, buyer: str | None, raw: Any, request_id: int | None = None) -> dict:
-        with self.lock:
-            if self.con is None:
-                raise EngineError(503, f"no data loaded yet: {self.data['error']}. POST /bundle to retry")
-            if not self.chain:
+    def query(self, buyer: str | None, raw: Any, request_id: int | None = None,
+              plan_id: str | None = None) -> dict:
+        if not self.chain:
+            with self.lock:
+                self._need_data()
                 if buyer is None:
                     raise EngineError(422, "local mode: send a buyer name")
-                return self._answer(self.clock(), buyer, raw)
-            if request_id is None:
-                raise EngineError(422, "chain mode: pay with request_query on the contract, then send its request_id")
-            paid = self.chain.request(request_id)
-            if paid is None or paid["dataset_id"] != self.dataset:
-                raise EngineError(404, f"no request {request_id} for {self.dataset} on {self.chain.contract_id}")
+                return self._answer(self.clock(), buyer, raw, plan_id=plan_id)
+        if request_id is None:
+            raise EngineError(422, "chain mode: pay with request_query on the contract, then send its request_id")
+        # Outside the lock: anyone can call /query, and these checks change nothing
+        paid = self._paid(request_id)
+        if from_millionths(paid["epsilon"]) > self._max_eps():
+            return self._refuse_unanswerable(paid)
+        if not self._proves(raw, paid):
+            raise EngineError(409, f"this spec doesn't hash to the spec_hash request {request_id} paid for, so "
+                                   f"nothing was recorded. Send the exact spec you paid for (a request paid "
+                                   f"for the wrong hash is refunded by expire() once it times out)")
+        with self.lock:
+            self._need_data()
+            paid = self._paid(request_id)  # fresh status, now that no one else can settle it
             receipt = self.state.receipt(request_id)
             if receipt is None:  # first time we see it
                 if paid["status"] != "pending":
                     raise EngineError(409, f"request {request_id} is already {paid['status']}")
-                out = self._answer(self.clock(), paid["buyer"], raw, paid)
-            else:  # seen before: never answer twice, but finish settling if that failed
-                out = self._response(receipt, self.state.answer_for(receipt))
+                out = self._answer(self.clock(), paid["buyer"], raw, paid, plan_id)
+                out["settle_tx"] = self._settle(out)
+                return out
+            # seen before: never answer twice. Hand out what is stored only once it is settled.
+            out = self._response(receipt, self.state.answer_for(receipt))
+            if paid["status"] == "pending":
+                out["settle_tx"] = self._settle(out)
+            elif paid["status"] == receipt["status"] or receipt["status"] == "refused":
+                out["settle_tx"] = None  # a refusal holds nothing secret
+            else:
+                raise self._unreleased(request_id, receipt, paid["status"])
+            return out
+
+    def _need_data(self) -> None:
+        if self.con is None:
+            raise EngineError(503, f"no data loaded yet: {self.data['error']}. POST /bundle to retry")
+
+    def _max_eps(self) -> Fraction:
+        return to_fraction(self.rules["max_epsilon"])
+
+    def _paid(self, request_id: int) -> dict:
+        paid = self.chain.request(request_id)
+        if paid is None or paid["dataset_id"] != self.dataset:
+            raise EngineError(404, f"no request {request_id} for {self.dataset} on {self.chain.contract_id}")
+        return paid
+
+    def _proves(self, raw: Any, paid: dict) -> bool:
+        """True if raw is the spec behind the paid spec_hash: its canonical hash, or for a
+        spec that breaks the rules (no canonical form), the hash of the raw JSON."""
+        if receipts.sha256_hex(raw) == paid["spec_hash"]:
+            return True
+        try:
+            return receipts.spec_hash(validate(raw, self.schema).canonical_json()) == paid["spec_hash"]
+        except Refused:
+            return False
+
+    def _refuse_unanswerable(self, paid: dict) -> dict:
+        """A request that reserved more epsilon than any question may use can never be
+        answered, so anyone may close it: this frees the budget it holds at once."""
+        request_id = int(paid["id"])
+        with self.lock:
+            paid = self._paid(request_id)
+            receipt = self.state.receipt(request_id)
+            if receipt is not None:  # always a refusal: no answer can carry that much epsilon
+                out = self._response(receipt, None)
+            elif paid["status"] != "pending":
+                raise EngineError(409, f"request {request_id} is already {paid['status']}")
+            else:
+                r = Refused(OVER_BUDGET, f"request {request_id} reserved epsilon "
+                                         f"{float(from_millionths(paid['epsilon'])):g}, above the per-query cap "
+                                         f"of {self.rules['max_epsilon']:g}")
+                out = self._finish(self.clock(), paid["buyer"], paid["spec_hash"], request_id, refusal=r.to_dict())
             out["settle_tx"] = self._settle(out) if paid["status"] == "pending" else None
             return out
+
+    def _unreleased(self, request_id: int, receipt: dict, status: str) -> EngineError:
+        """The chain closed this request (expired) before our settle landed. Its answer
+        never left the enclave, so drop it and give its epsilon back to the local ledger."""
+        self.state.forget(request_id)
+        return EngineError(410, f"request {request_id} is {status} on-chain (refunded) before it was settled, "
+                                f"so its answer was never released and has been thrown away. Pay again to ask")
 
     def _settle(self, out: dict) -> str:
         r = out["receipt"]
@@ -268,7 +343,8 @@ class Blindfold:
             raise EngineError(502, f"answered, but settle failed, so nothing is returned yet. "
                                    f"Send the same request_id again to retry. ({e})") from e
 
-    def _answer(self, now: float, buyer: str, raw: Any, paid: dict | None = None) -> dict:
+    def _answer(self, now: float, buyer: str, raw: Any, paid: dict | None = None,
+                plan_id: str | None = None) -> dict:
         request_id = int(paid["id"]) if paid else None
         spec_hash = receipts.sha256_hex(raw)  # replaced by the canonical hash once the spec checks out
         try:
@@ -287,8 +363,11 @@ class Blindfold:
                                              f"{request_id} reserved {float(from_millionths(paid['epsilon'])):g}")
 
             hit = self.state.cached(self.dataset, spec_hash)
+            if hit and self.chain and not self._released(hit.request_id):
+                hit = None  # its request expired before settling: the answer never left, so make a fresh one
             if hit:
-                return self._finish(now, buyer, spec_hash, request_id, answer=hit.answer, replay_of=hit.request_id)
+                return self._finish(now, buyer, spec_hash, request_id, answer=hit.answer, replay_of=hit.request_id,
+                                    plan_id=plan_id)
 
             left = self.remaining()
             if left == 0:
@@ -297,21 +376,38 @@ class Blindfold:
                 raise Refused(OVER_BUDGET, f"epsilon {cq.spec.epsilon:g} is more than the {float(left):g} left in the budget")
 
             result = answer(cq, run(self.con, cq), self.rules["small_cell_threshold"])
-            return self._finish(now, buyer, spec_hash, request_id, answer=result, charge=eps, left=left)
+            return self._finish(now, buyer, spec_hash, request_id, answer=result, charge=eps, left=left,
+                                plan_id=plan_id)
         except Refused as r:
             return self._finish(now, buyer, spec_hash, request_id, refusal=r.to_dict())
 
+    def _released(self, request_id: int) -> bool:
+        """Chain mode: may the cached answer of request_id be replayed? Only once it is settled as
+        answered on-chain. While it is still pending, the buyer is asked to retry; if it expired,
+        its answer was never handed out, so it is dropped (and its epsilon given back)."""
+        on_chain = self.chain.request(request_id)
+        status = on_chain["status"] if on_chain else "missing"
+        if status == "answered":
+            return True
+        if status == "pending":
+            raise EngineError(409, f"the same question is being settled for request {request_id}; "
+                                   f"send this again in a minute (nothing was recorded)")
+        self.state.forget(request_id)
+        return False
+
     def _finish(self, now: float, buyer: str, spec_hash: str, request_id: int | None, answer: dict | None = None,
                 refusal: dict | None = None, charge: Fraction | None = None, replay_of: int | None = None,
-                left: Fraction | None = None) -> dict:
+                left: Fraction | None = None, plan_id: str | None = None) -> dict:
         status = "refused" if refusal else "answered"
         charged = charge or Fraction(0)
         left_after = (self.remaining() if left is None else left) - charged
+        planned = self.plans.get(plan_id) if plan_id else None
+        model_signature = planned[1] if planned and planned[0] == spec_hash else None
 
         def make_receipt(rid: int) -> dict:
             unsigned = receipts.build(rid, self.dataset, spec_hash, status, answer, charged, left_after,
                                       refusal, replay_of, now, self.enclave.compose_hash,
-                                      self.plans.get(spec_hash))
+                                      model_signature)
             return receipts.sign(unsigned, self.enclave.signer)
 
         receipt = self.state.log(self.dataset, buyer, now, status, refusal["rule"] if refusal else None,
@@ -342,6 +438,8 @@ class QueryRequest(BaseModel):
     buyer: str | None = Field(None, pattern=r"^[a-z0-9_.-]{2,64}$",
                               description="Local mode: the buyer's NEAR account, e.g. alice.testnet")
     request_id: int | None = Field(None, ge=0, description="Chain mode: the id request_query returned")
+    plan_id: str | None = Field(None, pattern=r"^[0-9a-f]{32}$",
+                                description="The plan_id /plan returned: puts the model's signature in the receipt")
     spec: Any = Field(description="A QuerySpec; see /schema for tables, columns and query_rules")
 
 
@@ -374,7 +472,7 @@ def create_app(engine: Blindfold | None = None) -> FastAPI:
     @app.post("/query")
     def post_query(req: QueryRequest) -> dict:
         try:
-            return engine.query(req.buyer, req.spec, req.request_id)
+            return engine.query(req.buyer, req.spec, req.request_id, req.plan_id)
         except EngineError as e:
             raise HTTPException(status_code=e.status, detail=e.detail) from e
 

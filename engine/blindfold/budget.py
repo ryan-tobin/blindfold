@@ -87,9 +87,15 @@ class State:
     def answer_for(self, receipt: dict) -> dict | None:
         if receipt["status"] != "answered":
             return None
-        row = self.con.execute("SELECT answer FROM answers WHERE request_id = ?",
-                               (receipt["replay_of"] or receipt["request_id"],)).fetchone()
+        source = receipt["replay_of"] if receipt["replay_of"] is not None else receipt["request_id"]
+        row = self.con.execute("SELECT answer FROM answers WHERE request_id = ?", (source,)).fetchone()
         return json.loads(row[0]) if row else None
+
+    def forget(self, request_id: int) -> None:
+        """Drop the answer of a request that expired on-chain before it was settled. It was
+        never handed out, so it spends no budget and may not be replayed."""
+        with self.con:
+            self.con.execute("DELETE FROM answers WHERE request_id = ?", (request_id,))
 
     def log(self, dataset: str, buyer: str, ts: float, status: str, rule: str | None,
             make_receipt: Callable[[int], dict], charge: tuple[str, Fraction, dict] | None = None,

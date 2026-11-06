@@ -231,3 +231,14 @@ def test_wallet_deposit_needs_registered_contract(monkeypatch, tmp_path):
     make_wallet(monkeypatch, tmp_path, "deposit", "2")
     with pytest.raises(SystemExit, match="register first"):
         wallet.main()
+
+@pytest.mark.parametrize("bad", ["/Users/you/.near-credentials/mainnet/you.near",
+                                 "../../.near-credentials/mainnet/you.near", "..", ".hidden", "", None, 7])
+def test_a_hostile_deposit_address_is_not_used_as_a_path(bad):  # audit #12
+    with pytest.raises(SystemExit, match="doesn't look like one"):
+        fund.safe_address(bad)
+
+
+def test_real_deposit_addresses_pass():
+    for ok in ("0x" + "ab" * 20, "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", "a" * 64):
+        assert fund.safe_address(ok) == ok

@@ -21,7 +21,7 @@ EPS ?= 0.1,0.2,0.5,1
 DATA_URL ?= https://github.com/ryan-tobin/blindfold/releases/download/riverside-data-v1/riverside.duckdb
 DATA_SHA256 ?= 9509ce8ae957b677399716ca41f4c47881e0f80daa1bb70ade9e3ef1a0ce8bc6
 
-.PHONY: help data test sql ask serve query reset contract register up register-enclave pay verify demo bench bundle buy ui data-quick
+.PHONY: help data test sql ask serve query reset contract register up register-enclave pay verify demo bench bundle buy ui data-quick lock
 
 help:
 	@echo "make data    generate 10,000 Synthea patients and build the 5 analytic tables"
@@ -48,6 +48,7 @@ help:
 	@echo "make ui		the browser UI on http://localhost:5173 (needs Node 20+)"
 	@echo "make data-quick  download the same tables, prebuilt (4 MB, checked by SHA-256)"
 	@echo "make demo    the whole local flow in one command: plan, answer, replay, refusal, verify"
+	@echo "make lock    re-pin engine/requirements.lock (every package the enclave image installs, with hashes)"
 
 data:
 	bash scripts/generate_data.sh
@@ -59,6 +60,11 @@ data-quick:
 	$(PYTHON) -c "import hashlib,sys; h=hashlib.sha256(open('data/riverside.duckdb.part','rb').read()).hexdigest(); sys.exit(0 if h=='$(DATA_SHA256)' else 'SHA-256 mismatch: '+h)"
 	mv data/riverside.duckdb.part data/riverside.duckdb
 	@echo "data/riverside.duckdb ready: the 5 tables make data builds (SHA-256 $(DATA_SHA256) checked)"
+
+lock:
+	$(PYTHON) -m uv --version >/dev/null 2>&1 || $(PYTHON) -m pip install -q uv==0.13.7
+	cd engine && $(PYTHON) -m uv pip compile pyproject.toml --generate-hashes --python-version 3.14 \
+		--python-platform x86_64-manylinux_2_28 --custom-compile-command "make lock" -o requirements.lock
 
 test:
 	cd engine && $(PYTHON) -m pytest -q

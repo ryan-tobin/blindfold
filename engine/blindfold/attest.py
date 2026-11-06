@@ -37,6 +37,32 @@ WARN = {"SWHardeningNeeded", "ConfigurationNeeded", "ConfigurationAndSWHardening
 # every check on the model are in the code.
 SECRET_ENVS = {"NEAR_AI_API_KEY"}
 
+# dstack logs each of these once. A second copy could shadow the real one.
+ONCE = {"app-id", "compose-hash", "instance-id", "os-image-hash", "key-provider"}
+# The OS side of the quote, pinned in verify/measurements.json to what our real enclaves report.
+PINNED = ("mr_td", "rt_mr0", "rt_mr1", "rt_mr2", "pre_launch_script_sha256")
+
+
+def measurements(att: dict) -> dict[str, str]:
+    """The values verify/measurements.json pins, read from one /attestation reply."""
+    report = td_report(bytes.fromhex(att["quote"]))
+    try:
+        script = json.loads(att.get("app_compose") or "{}").get("pre_launch_script") or ""
+    except ValueError:
+        script = ""
+    out = {k: report[k].hex() for k in PINNED[:4]}
+    out["pre_launch_script_sha256"] = hashlib.sha256(script.encode()).hexdigest() if script else "none"
+    return out
+
+
+def load_known(path) -> dict[str, list[str]]:
+    """verify/measurements.json: field -> accepted values. Missing file: nothing pinned."""
+    try:
+        with open(path) as f:
+            return {k: v for k, v in json.load(f).items() if k in PINNED}
+    except FileNotFoundError:
+        return {}
+
 
 def td_report(quote: bytes) -> dict[str, bytes]:
     """The measurement registers and report_data, read straight from the quote bytes."""
@@ -93,9 +119,11 @@ def intel_check(quote: bytes, pccs: str = PHALA_PCCS) -> tuple[bool | None, str]
 
 
 def check(att: dict, compose_file: str | None = None, pccs: str = PHALA_PCCS,
-          compose_name: str = "docker-compose.tee.yml") -> list[tuple[bool | None, str]]:
+          compose_name: str = "docker-compose.tee.yml",
+          known: dict[str, list[str]] | None = None) -> list[tuple[bool | None, str]]:
     """All the checks on one /attestation reply, as (ok, text): True pass, None warn, False fail.
-    compose_file is the text of the repo's compose file, compose_name its file name (for the label)."""
+    compose_file is the text of the repo's compose file, compose_name its file name (for the label).
+    known (load_known) pins the OS measurements; None skips those checks."""
     out: list[tuple[bool | None, str]] = []
     rd = expected_report_data(att)
     out.append((att["report_data"] == rd.hex(), "report_data = sha256(signer key + encryption key + schema hash)"))
@@ -117,6 +145,10 @@ def check(att: dict, compose_file: str | None = None, pccs: str = PHALA_PCCS,
     replays = [replay([(e["digest"] or event_digest(e)) if i == 3 else e["digest"] for e in events if e["imr"] == i])
                for i in range(4)]
     out.append((replays == [report[f"rt_mr{i}"] for i in range(4)], "replaying the event log gives the quote's RTMR0-3"))
+    names = [e["event"] for e in rtmr3]
+    twice = sorted({n for n in names if n in ONCE and names.count(n) > 1})
+    out.append((not twice, f"RTMR3 logs {', '.join(twice)} more than once" if twice
+                else "each of app-id, compose-hash, os-image-hash and key-provider is logged at most once"))
     logged = {e["event"]: as_text(e["event_payload"]) for e in rtmr3}
     app_compose = att.get("app_compose") or ""
     composed = hashlib.sha256(app_compose.encode()).hexdigest()
@@ -142,6 +174,16 @@ def check(att: dict, compose_file: str | None = None, pccs: str = PHALA_PCCS,
     if manifest.get("pre_launch_script"):
         script = hashlib.sha256(manifest["pre_launch_script"].encode()).hexdigest()
         out.append((True, f"a pre-launch script runs too (sha256 {script[:16]}…, in app_compose)"))
+    if known is not None:
+        values = measurements(att)
+        for field in PINNED:
+            allowed, value = known.get(field) or [], values[field]
+            label = "pre-launch script sha256" if field == "pre_launch_script_sha256" else field.upper().replace("_", "")
+            if not allowed:
+                out.append((None, f"{label} {value[:16]}… is not pinned yet (verify/measurements.json)"))
+            else:
+                out.append((value in allowed, f"{label} {value[:16]}… is "
+                                              f"{'one of' if value in allowed else 'NOT one of'} the pinned values"))
     os_hash = att.get("os_image_hash") or "unknown"
     if "os-image-hash" in logged:
         out.append((logged["os-image-hash"] == os_hash, f"OS image {os_hash[:16]}… is in the quote (dstack's, checked by Phala's KMS)"))

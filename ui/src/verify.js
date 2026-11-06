@@ -4,12 +4,14 @@
 // Intel's signature over the quote needs Intel's collateral, so `make verify` checks that one.
 import teeCompose from "../../docker-compose.tee.yml?raw";
 import mainnetCompose from "../../docker-compose.mainnet.yml?raw";
+import measurements from "../../verify/measurements.json";
 import { b58decode, canonical, digest, fromHex, hex, rawParse, sha256hex, utf8 } from "./canon.js";
 import { engineRaw, view } from "./api.js";
 
 const COMPOSE = { "docker-compose.tee.yml": teeCompose, "docker-compose.mainnet.yml": mainnetCompose };
 const BODY = 48; // TDX quote v4: 48-byte header, then the TD report
-const RTMR0 = 328, REPORT_DATA = 520;
+const MR_TD = 136, RTMR0 = 328, REPORT_DATA = 520;
+const ONCE = ["app-id", "compose-hash", "instance-id", "os-image-hash", "key-provider"]; // as attest.ONCE
 
 async function signatureOk(r) {
   const pub = r.signer_pubkey || "", sig = r.sig || "";
@@ -74,6 +76,9 @@ export async function enclaveChecks(att, net) {
   out.push({ ok: match.every(Boolean), text: `all ${rtmr3.length} RTMR3 events match their digests` });
   const replays = await Promise.all([0, 1, 2, 3].map((i) => replay(filled.filter((_, j) => events[j].imr === i))));
   out.push({ ok: replays.every((r, i) => r === at(RTMR0 + 48 * i, 48)), text: "replaying the event log gives the quote's RTMR0-3" });
+  const twice = ONCE.filter((n) => rtmr3.filter((e) => e.event === n).length > 1);
+  out.push({ ok: twice.length === 0, text: twice.length ? `RTMR3 logs ${twice.join(", ")} more than once`
+    : "each of app-id, compose-hash, os-image-hash and key-provider is logged at most once" });
   const logged = Object.fromEntries(rtmr3.map((e) => [e.event, asText(e.event_payload)]));
   const composed = await sha256hex(att.app_compose || "");
   out.push({ ok: logged["compose-hash"] === composed && composed === att.compose_hash,
@@ -82,6 +87,17 @@ export async function enclaveChecks(att, net) {
   try { manifest = JSON.parse(att.app_compose); } catch { /* checked above */ }
   out.push({ ok: manifest.docker_compose_file === COMPOSE[net.compose],
              text: `the deployed compose file is ${net.compose} from this repo (it pins the engine image)` });
+  // The OS side of the quote, pinned in verify/measurements.json (as attest.measurements)
+  const values = {
+    mr_td: at(MR_TD, 48), rt_mr0: at(RTMR0, 48), rt_mr1: at(RTMR0 + 48, 48), rt_mr2: at(RTMR0 + 96, 48),
+    pre_launch_script_sha256: manifest.pre_launch_script ? await sha256hex(manifest.pre_launch_script) : "none",
+  };
+  for (const [field, value] of Object.entries(values)) {
+    const allowed = measurements[field] || [];
+    const label = field === "pre_launch_script_sha256" ? "pre-launch script sha256" : field.toUpperCase().replaceAll("_", "");
+    out.push(allowed.length === 0 ? { ok: null, text: `${label} ${value.slice(0, 16)}… is not pinned yet` }
+      : { ok: allowed.includes(value), text: `${label} ${value.slice(0, 16)}… is ${allowed.includes(value) ? "one of" : "NOT one of"} the pinned values` });
+  }
   return out;
 }
 

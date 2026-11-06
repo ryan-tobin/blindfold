@@ -1,0 +1,8 @@
+{
+  "about": "The OS side of our real enclaves' quotes, pinned so a different OS or pre-launch script fails verify. Fill in with: python verify/verify.py --engine URL --measurements (once per enclave; both lists can hold several values).",
+  "mr_td": [],
+  "rt_mr0": [],
+  "rt_mr1": [],
+  "rt_mr2": [],
+  "pre_launch_script_sha256": []
+}

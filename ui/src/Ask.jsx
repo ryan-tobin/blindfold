@@ -69,12 +69,13 @@ export function Ask({ net, connector, account, dataset, balance, onAnswered, onV
   });
 
   const payAndAsk = () => run(local ? "Asking…" : "Waiting for your wallet…", async () => {
-    let body = { buyer: "browser.local", spec: plan.spec };
+    const signed = plan.plan_id ? { plan_id: plan.plan_id } : {}; // puts the model's signature in the receipt
+    let body = { buyer: "browser.local", spec: plan.spec, ...signed };
     let paid = null;
     if (!local) {
       paid = await payForPlan(connector, net, account, plan);
       setStep(`Paid: request #${paid.id}. The enclave is answering and settling on-chain…`);
-      body = { request_id: paid.id, spec: plan.spec };
+      body = { request_id: paid.id, spec: plan.spec, ...signed };
     }
     const { data: out, text } = await engineRaw(net, "/query", body);
     setResult({ ...out, pay_tx: paid?.tx, raw: text });

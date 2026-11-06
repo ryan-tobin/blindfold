@@ -150,6 +150,13 @@ def validate(raw: dict | QuerySpec, schema: dict) -> ValidSpec:
 
     filters = tuple(_filter(f, table, schema, rules) for f in spec.filters)
     numerator = tuple(_filter(f, table, schema, rules) for f in spec.numerator_filter)
+    for group in (filters, numerator):
+        refs = [f.column.ref for f in group]
+        twice = next((r for r in refs if refs.count(r) > 1), None)
+        if twice:
+            raise Refused(OFF_SCHEMA, f"'{twice}' is filtered more than once: use one filter per column "
+                                      f"(one range, or 'in' with a list)")
+    _check_date_overlap(filters + numerator, rules)
     group_by = [_column(ref, table, schema) for ref in spec.group_by]
     column = _column(spec.column, table, schema) if spec.column is not None else None
 
@@ -300,6 +307,22 @@ def _filter(raw: Any, base: str, schema: dict, rules: dict) -> Filter:
     if col.kind == "date" and (hi - lo).days + 1 < rules["min_date_range_days"]:
         raise Refused(TOO_FINE, f"{where}: date ranges must cover at least {rules['min_date_range_days']} days")
     return Filter(col, "between", (lo, hi))
+
+
+def _check_date_overlap(filters: tuple[Filter, ...], rules: dict) -> None:
+    """A date column filtered in both filters and numerator_filter: the rows that match both
+    fall in the overlap of the two ranges, so the overlap must cover min_date_range_days too."""
+    spans: dict[str, tuple[dt.date, dt.date]] = {}
+    for f in filters:
+        if f.column.kind != "date":
+            continue
+        lo, hi = f.value
+        if f.column.ref in spans:
+            lo, hi = max(lo, spans[f.column.ref][0]), min(hi, spans[f.column.ref][1])
+            if (hi - lo).days + 1 < rules["min_date_range_days"]:
+                raise Refused(TOO_FINE, f"the ranges on '{f.column.ref}' overlap by less than "
+                                        f"{rules['min_date_range_days']} days")
+        spans[f.column.ref] = (lo, hi)
 
 
 def _bounds_for_test(col: Column, filters: tuple[Filter, ...]) -> tuple[float, float]:

@@ -20,6 +20,7 @@ from nacl.signing import SigningKey
 from blindfold import load, near, receipts
 from blindfold.app import Blindfold, create_app
 from blindfold.chain import MILLION, to_millionths
+from blindfold.refuse import Refused
 from blindfold.spec import validate
 
 SCHEMA = load.load_schema(load.DEFAULT_SCHEMA)
@@ -28,7 +29,11 @@ BY_SEX = {"dataset": "riverside", "measure": "count", "table": "patients", "grou
 
 
 def spec_hash(spec):
-    return receipts.spec_hash(validate(spec, SCHEMA).canonical_json())
+    """What a buyer pays for: the canonical hash, or the raw hash for a spec that breaks the rules."""
+    try:
+        return receipts.spec_hash(validate(spec, SCHEMA).canonical_json())
+    except Refused:
+        return receipts.sha256_hex(spec)
 
 
 class FakeChain:
@@ -40,13 +45,20 @@ class FakeChain:
         self.requests = []
         self.settled = []
         self.fail_next_settle = False
+        self.expire_before_settle = False
 
     def pay(self, spec, buyer="alice.testnet", epsilon=None):
-        eps = to_millionths(Fraction(str(spec["epsilon"] if epsilon is None else epsilon)))
+        eps = to_millionths(Fraction(str(spec.get("epsilon", 0.1) if epsilon is None else epsilon)))
         self.requests.append({"id": str(len(self.requests)), "buyer": buyer, "dataset_id": "riverside",
                               "spec_hash": spec_hash(spec), "epsilon": eps, "status": "pending"})
         self.ds["epsilon_pending"] += eps
         return len(self.requests) - 1
+
+    def expire(self, request_id):
+        r = self.requests[request_id]
+        assert r["status"] == "pending"
+        r["status"] = "expired"
+        self.ds["epsilon_pending"] -= r["epsilon"]
 
     def dataset(self, dataset_id):
         return dict(self.ds)
@@ -59,6 +71,11 @@ class FakeChain:
             self.fail_next_settle = False
             raise near.NearError("RPC timed out")
         r = self.requests[request_id]
+        if self.expire_before_settle:  # the buyer's expire() lands first
+            self.expire_before_settle = False
+            self.expire(request_id)
+        if r["status"] != "pending":
+            raise near.NearError("Smart contract panicked: request is not pending")
         assert r["status"] == "pending" and to_millionths(epsilon_charged) <= r["epsilon"]
         r["status"] = status
         self.ds["epsilon_pending"] -= r["epsilon"]
@@ -113,21 +130,40 @@ def test_replay_is_paid_but_costs_no_epsilon(tiny_db, tmp_path):
     assert chain.settled[1][1:] == ("answered", again["receipt_hash"], Fraction(0), None)
 
 
-def test_question_not_the_one_paid_for_is_refused_and_refunded(tiny_db, tmp_path):
-    chain, _, client = make(tiny_db, tmp_path)
+def test_a_spec_that_isnt_the_one_paid_for_changes_nothing(tiny_db, tmp_path):
+    chain, engine, client = make(tiny_db, tmp_path)
     paid = chain.pay(BY_SEX)
-    out = ask(client, paid, {**BY_SEX, "group_by": ["age_band"]})
+    for wrong in ({**BY_SEX, "group_by": ["age_band"]}, {"x": 1}, {}, "x"):  # audit #2: a stranger goes first
+        assert "nothing was recorded" in ask(client, paid, wrong, status=409)["detail"]
+    assert chain.settled == [] and engine.state.receipt(paid) is None and engine.state.recent("alice.testnet", 0) == 0
+    out = ask(client, paid)  # the buyer's own spec still works
+    assert out["status"] == "answered" and out["settle_tx"] == "tx1"
+
+
+def test_right_question_with_the_wrong_epsilon_is_refused_and_refunded(tiny_db, tmp_path):
+    chain, _, client = make(tiny_db, tmp_path)
+    cheap = chain.pay(BY_SEX, epsilon=0.1)  # right question, but only 0.1 reserved
+    out = ask(client, cheap)
     assert out["refusal"]["rule"] == "spec_mismatch" and out["refusal"]["rule_number"] == 6
     assert chain.settled[-1][1:] == ("refused", out["receipt_hash"], Fraction(0), "spec_mismatch")
-    cheap = chain.pay(BY_SEX, epsilon=0.1)  # right question, but only 0.1 reserved
-    assert ask(client, cheap)["refusal"]["rule"] == "spec_mismatch"
     assert chain.ds["epsilon_spent"] == 0
+
+
+def test_a_stranger_cant_read_a_paid_answer(tiny_db, tmp_path):  # audit #1
+    chain, _, client = make(tiny_db, tmp_path)
+    paid = chain.pay(BY_SEX)
+    ask(client, paid)
+    for probe in ({}, {"garbage": 1}, "x", {**BY_SEX, "group_by": ["age_band"]}):
+        r = client.post("/query", json={"request_id": paid, "spec": probe})
+        assert r.status_code == 409 and "cells" not in r.text
+    assert ask(client, paid)["answer"]["cells"]  # the buyer, with the spec, still can
 
 
 def test_bad_spec_is_refused_on_chain_too(tiny_db, tmp_path):
     chain, _, client = make(tiny_db, tmp_path)
-    paid = chain.pay(BY_SEX)
-    out = ask(client, paid, {**BY_SEX, "measure": "rows"})
+    bad = {**BY_SEX, "measure": "rows"}
+    paid = chain.pay(bad)  # paid for by its raw hash, as agent/pay_and_ask.py --pay-anyway does
+    out = ask(client, paid, bad)
     assert out["refusal"]["rule"] == "not_aggregate"
     assert chain.settled[-1][4] == "not_aggregate"
 
@@ -198,3 +234,64 @@ def test_transaction_bytes_match_py_near():
                                        (b"hello world", "StV1DL6CwTryKyV")])
 def test_base58(data, text):
     assert near.b58encode(data) == text and near.b58decode(text) == data
+
+def test_no_answer_after_the_request_expired(tiny_db, tmp_path):  # audit #3 and #5
+    chain, engine, client = make(tiny_db, tmp_path)
+    paid = chain.pay(BY_SEX)
+    chain.expire_before_settle = True
+    assert ask(client, paid, status=502)["detail"].startswith("answered, but settle failed")
+    r = client.post("/query", json={"request_id": paid, "spec": BY_SEX})
+    assert r.status_code == 410 and "cells" not in r.text
+    assert engine.state.spent("riverside") == 0  # the unreleased answer gave its epsilon back
+    again = ask(client, chain.pay(BY_SEX))  # the same question later: a fresh answer, charged on-chain
+    assert again["replay_of"] is None and chain.settled[-1][3] == Fraction(1)
+    assert engine.state.spent("riverside") == 1 == chain.ds["epsilon_spent"] / MILLION
+
+
+def test_a_settle_that_landed_anyway_is_returned(tiny_db, tmp_path):
+    chain, engine, client = make(tiny_db, tmp_path)
+    paid = chain.pay(BY_SEX)
+    chain.fail_next_settle = True
+    ask(client, paid, status=502)
+    chain.requests[paid]["status"] = "answered"  # the settle went through; only the reply was lost
+    out = ask(client, paid)
+    assert out["answer"]["cells"] and out["settle_tx"] is None
+
+
+def test_replay_waits_until_the_first_answer_is_settled(tiny_db, tmp_path):  # audit #5
+    chain, engine, client = make(tiny_db, tmp_path)
+    first = chain.pay(BY_SEX)
+    chain.fail_next_settle = True
+    ask(client, first, status=502)  # answered and cached, but not settled yet
+    second = chain.pay(BY_SEX, buyer="bob.testnet")
+    assert "in a minute" in ask(client, second, status=409)["detail"]
+    chain.expire(first)  # the first buyer never came back
+    out = ask(client, second)
+    assert out["replay_of"] is None and chain.settled[-1][1:4:2] == ("answered", Fraction(1))
+    assert chain.ds["epsilon_spent"] == MILLION and engine.state.spent("riverside") == 1
+
+
+def test_replay_of_request_0_returns_its_answer(tiny_db, tmp_path):  # audit #11
+    chain, engine, client = make(tiny_db, tmp_path)
+    first = ask(client, chain.pay(BY_SEX))
+    again = chain.pay(BY_SEX, buyer="bob.testnet")
+    chain.fail_next_settle = True
+    ask(client, again, status=502)
+    out = ask(client, again)
+    assert out["replay_of"] == 0 and out["answer"] == first["answer"]
+
+
+def test_a_request_over_the_epsilon_cap_is_closed_by_anyone(tiny_db, tmp_path):  # audit #6
+    chain, engine, client = make(tiny_db, tmp_path)
+    chain.requests.append({"id": "0", "buyer": "mallory.testnet", "dataset_id": "riverside",
+                           "spec_hash": "ab" * 32, "epsilon": 10 * MILLION, "status": "pending"})
+    chain.ds["epsilon_pending"] = 10 * MILLION
+    out = ask(client, 0, {})  # no spec needed: no question may use that much
+    assert out["refusal"]["rule"] == "over_budget" and chain.ds["epsilon_pending"] == 0
+    assert chain.settled[0][1] == "refused" and ask(client, 0, {})["settle_tx"] is None
+
+
+def test_a_lying_rpc_cant_raise_the_total_budget(tiny_db, tmp_path):  # audit #4
+    chain = FakeChain(epsilon_total=1000)
+    _, engine, client = make(tiny_db, tmp_path, chain)
+    assert client.get("/budget").json()["epsilon_total"] == 99  # the engine's own cap

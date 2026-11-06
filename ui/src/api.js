@@ -60,7 +60,14 @@ export function precheck(dataset, balance, epsilon) {
 
 // The wallet signs request_query. The request id is the call's return value,
 // or, if the wallet doesn't hand back the outcome, the newest matching request.
+// The contract has no max-price argument, so the price is read again right before the
+// wallet signs: if the owner changed it since the plan was shown, stop and re-plan.
+// The buyer's per_query_max still caps what a later change could cost.
 export async function payForPlan(connector, net, account, plan) {
+  const now = await view(net, "get_dataset", { id: DATASET });
+  if (plan.price && String(now.price) !== String(plan.price.amount)) {
+    throw new Error(`the price changed from ${usdc(plan.price.amount)} to ${usdc(now.price)} since this plan: plan again to see it`);
+  }
   const args = { dataset_id: DATASET, spec_hash: plan.spec_hash, epsilon: toMillionths(plan.epsilon) };
   const outcome = await callContract(connector, net, account, "request_query", args);
   const tx = outcome?.transaction?.hash || outcome?.transaction_outcome?.id || null;

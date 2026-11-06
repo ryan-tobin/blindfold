@@ -24,8 +24,10 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 import time
+import urllib.parse
 
 from common import ROOT, USDC, http_json, near_client, usdc_text, usdc_units
 
@@ -37,6 +39,14 @@ ORIGIN = {  # USDC on the origin chains, as 1Click names them (GET /v0/tokens)
 DESTINATION = "nep141:" + USDC["mainnet"]
 DONE = {"SUCCESS", "REFUNDED", "FAILED"}
 SAVE_DIR = ROOT / "data" / "intents"
+ADDRESS = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def safe_address(address) -> str:
+    """depositAddress comes from 1Click's reply and becomes a file name: letters, digits, . _ - only."""
+    if not isinstance(address, str) or not ADDRESS.fullmatch(address) or ".." in address:
+        raise SystemExit(f"1Click sent a deposit address that doesn't look like one: {address!r}. Not saving it.")
+    return address
 
 
 def headers() -> dict:
@@ -102,7 +112,7 @@ def watch(deposit_address: str, recipient: str | None, every: float = 10, sleep=
     """Poll /v0/status until it's done. Returns the final status."""
     last = None
     while True:
-        s = http_json("GET", f"{API}/v0/status?depositAddress={deposit_address}", headers=headers(), timeout=30)
+        s = http_json("GET", f"{API}/v0/status?depositAddress={urllib.parse.quote(deposit_address, safe='')}", headers=headers(), timeout=30)
         if s["status"] != last:
             print(f"{dt.datetime.now().strftime('%H:%M:%S')}  {s['status']}")
             last = s["status"]
@@ -153,7 +163,7 @@ def main() -> None:
         print("\nthat was a dry quote: nothing moved. Add --go for a real deposit address.")
         return
 
-    address = quote["quote"]["depositAddress"]
+    address = safe_address(quote["quote"]["depositAddress"])
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     (SAVE_DIR / f"{address}.json").write_text(json.dumps(quote, indent=2))
     print(f"\nsaved the signed quote to data/intents/{address}.json")

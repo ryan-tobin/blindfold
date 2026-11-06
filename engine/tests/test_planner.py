@@ -70,6 +70,8 @@ class FakeNearAI:
         self.sign_key = KEY
         self.tamper = False
         self.missing_signatures = 0
+        self.report_data = "good"
+        self.kind = "provider_tee"
 
     def __call__(self, method, url, headers, body):
         assert headers["Authorization"] == "Bearer sk-test"
@@ -79,10 +81,16 @@ class FakeNearAI:
         if u.path.endswith("/attestation/report"):
             nonce = q["nonce"] if self.echo_nonce else "00" * 32
             rd = bytes.fromhex(address()[2:]) + bytes(12) + bytes.fromhex(nonce)
+            # live NEAR AI sends no report_data field: it's only inside the Intel quote (TDX v4, at 48+520)
+            quote_rd = bytes(64) if self.report_data == "bad quote" else rd
+            quote = b"\x04\x00" + bytes(46) + bytes(520) + quote_rd + bytes(64)
+            model = {"signing_address": address(), "signing_algo": "ecdsa", "request_nonce": nonce,
+                     "intel_quote": quote.hex()}
+            if self.report_data not in ("good", "bad quote"):
+                model["report_data"] = self.report_data  # listed too, but disagreeing with the quote
             return 200, json.dumps({
                 "gateway_attestation": {"signing_address": "ab" * 32, "signing_algo": "ed25519"},
-                "model_attestations": [{"signing_address": address(), "signing_algo": "ecdsa",
-                                        "request_nonce": nonce, "report_data": rd.hex(), "intel_quote": "00"}],
+                "model_attestations": [model],
             }).encode()
         if u.path.endswith("/chat/completions"):
             chat_id = f"chatcmpl-{len(self.chats)}"
@@ -100,7 +108,7 @@ class FakeNearAI:
             text = f"{MODEL}:{hashlib.sha256(req).hexdigest()}:{hashlib.sha256(resp).hexdigest()}"
             return 200, json.dumps({"text": text, "signature": "0x" + sign(text, self.sign_key),
                                     "signing_address": address(self.sign_key), "signing_algo": "ecdsa",
-                                    "signature_kind": "provider_tee"}).encode()
+                                    "signature_kind": self.kind}).encode()
         return 404, b"{}"
 
 
@@ -271,9 +279,52 @@ def test_receipt_carries_the_model_signature(tiny_db, tmp_path):
     c = client(tiny_db, tmp_path, planner=planner(fake))
     plan = c.post("/plan", json={"question": "patients by sex, epsilon 1"}).json()
     assert plan["planner"] == "near-ai" and plan["model"] == MODEL
-    out = c.post("/query", json={"buyer": "alice.testnet", "spec": plan["spec"]}).json()
+    body = {"buyer": "alice.testnet", "spec": plan["spec"], "plan_id": plan["plan_id"]}
+    out = c.post("/query", json=body).json()
     r = out["receipt"]
     assert out["status"] == "answered" and r["spec_hash"] == plan["spec_hash"]
     assert r["model_signature"] == plan["model_signature"] and receipts.signature_ok(r)
-    other = c.post("/query", json={"buyer": "alice.testnet", "spec": {**BY_SEX, "epsilon": 0.5}}).json()
-    assert other["receipt"]["model_signature"] is None
+    other = c.post("/query", json={**body, "spec": {**BY_SEX, "epsilon": 0.5}}).json()
+    assert other["receipt"]["model_signature"] is None  # the plan_id is for another spec
+    bare = c.post("/query", json={"buyer": "bob.testnet", "spec": plan["spec"]}).json()
+    assert bare["receipt"]["model_signature"] is None  # no plan_id: hand-written, as far as we know
+
+
+def test_another_plan_cant_change_whose_signature_a_receipt_carries(tiny_db, tmp_path):  # audit #9
+    fake = FakeNearAI(json.dumps(BY_SEX), json.dumps(BY_SEX))
+    c = client(tiny_db, tmp_path, planner=planner(fake))
+    mine = c.post("/plan", json={"question": "patients by sex, epsilon 1"}).json()
+    theirs = c.post("/plan", json={"question": "count everyone by sex, eps 1"}).json()
+    assert mine["spec_hash"] == theirs["spec_hash"] and mine["plan_id"] != theirs["plan_id"]
+    out = c.post("/query", json={"buyer": "alice.testnet", "spec": mine["spec"], "plan_id": mine["plan_id"]}).json()
+    assert out["receipt"]["model_signature"]["chat_id"] == mine["model_signature"]["chat_id"]
+
+
+@pytest.mark.parametrize("report_data", ["bad quote", "", "zz", "00" * 64])
+def test_attestation_without_a_binding_report_data_fails(report_data):  # audit #10
+    fake = FakeNearAI(json.dumps(READMIT))
+    fake.report_data = report_data
+    with pytest.raises(PlanError, match="report_data"):
+        planner(fake).plan("q")
+
+
+def test_a_gateway_signature_is_not_enough():  # audit #10
+    fake = FakeNearAI(json.dumps(READMIT))
+    fake.kind = "gateway"
+    with pytest.raises(PlanError, match="gateway"):
+        planner(fake).plan("q")
+
+
+def test_a_listed_report_data_that_matches_the_quote_is_fine():
+    fake = FakeNearAI(json.dumps(READMIT))
+    real = fake.__call__
+    def with_field(method, url, headers, body):
+        status, data = real(method, url, headers, body)
+        if "/attestation/report" in url:
+            d = json.loads(data)
+            q = bytes.fromhex(d["model_attestations"][0]["intel_quote"])
+            d["model_attestations"][0]["report_data"] = q[568:632].hex()
+            data = json.dumps(d).encode()
+        return status, data
+    p = Planner(NearAI("sk-test", MODEL, transport=with_field, sleep=lambda s: None), SCHEMA)
+    assert p.plan("readmission rate, diabetics 65+, by sex").model_signature

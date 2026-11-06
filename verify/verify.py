@@ -35,6 +35,7 @@ from blindfold.near import RPC_URLS, Near
 
 GREEN, YELLOW, RED, END = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
 TEE_COMPOSE = Path(__file__).resolve().parents[1] / "docker-compose.tee.yml"
+MEASUREMENTS = Path(__file__).resolve().parent / "measurements.json"
 failed = False
 
 
@@ -61,7 +62,15 @@ def main() -> None:
     p.add_argument("--network", default=os.environ.get("NEAR_NETWORK", "testnet"))
     p.add_argument("--compose", type=Path, default=TEE_COMPOSE, help="the compose file the enclave should run")
     p.add_argument("--pccs", default=attest.PHALA_PCCS, help="collateral server, or https://api.trustedservices.intel.com")
+    p.add_argument("--measurements", action="store_true",
+                   help="print the engine's OS measurements, to pin in verify/measurements.json, and stop")
     a = p.parse_args()
+
+    if a.measurements:
+        if not a.engine:
+            p.error("--measurements needs --engine")
+        print(json.dumps(attest.measurements(get_json(f"{a.engine.rstrip('/')}/attestation")), indent=2))
+        return
 
     if a.receipt:
         with open(a.receipt) as f:
@@ -103,7 +112,7 @@ def main() -> None:
         info = get_json(f"{a.engine.rstrip('/')}/info")
         check(att["signer_pubkey"] == r["signer_pubkey"], "signer is the engine's enclave key")
         compose = a.compose.read_text() if a.compose.exists() else None
-        for ok, text in attest.check(att, compose, a.pccs, a.compose.name):
+        for ok, text in attest.check(att, compose, a.pccs, a.compose.name, attest.load_known(MEASUREMENTS)):
             check(ok, text)
         if att["mode"] == "tdx":
             check(r.get("compose_hash") == att["compose_hash"], "the receipt names this compose hash")

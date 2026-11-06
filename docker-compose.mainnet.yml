@@ -12,6 +12,7 @@ services:
     shm_size: 256mb
     environment:
       CONTRACT_ID: blindfold.ryan-tobin.near
+      BLINDFOLD_EPSILON_TOTAL: "10"
       NEAR_NETWORK: mainnet
       BUNDLE_URL: https://github.com/ryan-tobin/blindfold/releases/download/riverside-mainnet-v1/riverside-mainnet.bundle
       NEAR_AI_MODEL: z-ai/glm-5.3-flash

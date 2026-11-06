@@ -182,3 +182,14 @@ def test_schema_rules_are_complete():
                   "admissions.admit_date", "admissions.discharge_date"}
     for table in SCHEMA["tables"].values():
         assert table["max_rows_per_patient"] >= 1
+
+def test_two_date_windows_cant_make_a_finer_one():  # audit #7
+    base = {"dataset": "riverside", "measure": "count", "table": "admissions"}
+    a, b = ["admit_date", "between", ["2026-02-02", "2026-03-03"]], ["admit_date", "between", ["2026-03-03", "2026-04-01"]]
+    with pytest.raises(Refused, match="more than once"):
+        validate({**base, "filters": [a, b]}, SCHEMA)
+    rate = {**base, "measure": "rate", "filters": [a], "numerator_filter": [b]}
+    with pytest.raises(Refused, match="overlap") as e:
+        validate(rate, SCHEMA)
+    assert e.value.rule == "too_fine"
+    validate({**rate, "numerator_filter": [a]}, SCHEMA)  # the same range in both is fine

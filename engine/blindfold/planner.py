@@ -43,6 +43,7 @@ from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
 from . import ethsig, receipts 
+from .attest import td_report
 from .refuse import NOT_AGGREGATE, OFF_SCHEMA, Refused 
 from .spec import ValidSpec, validate
 
@@ -291,10 +292,17 @@ class NearAI:
         if m.get("request_nonce") != nonce:
             raise PlanError("the model's attestation doesn't echo our nonce")
         address = m["signing_address"].lower()
-        if m.get("report_data"):  # 64 bytes: signing address padded to 32, then our nonce
-            rd = bytes.fromhex(m["report_data"].removeprefix("0x"))
-            if rd[32:64] != bytes.fromhex(nonce) or rd[:20] != bytes.fromhex(address.removeprefix("0x")):
-                raise PlanError("the model's report_data doesn't bind its signing address and our nonce")
+        # The quote's report_data (64 bytes): signing address padded to 32, then our nonce.
+        # Read from the Intel quote itself; if NEAR AI also sends report_data, it must agree.
+        try:
+            rd = td_report(bytes.fromhex(m["intel_quote"].removeprefix("0x")))["report_data"]
+            listed = m.get("report_data")
+            bound = (rd[32:64] == bytes.fromhex(nonce) and rd[:20] == bytes.fromhex(address.removeprefix("0x"))
+                     and (listed is None or bytes.fromhex(listed.removeprefix("0x")) == rd))
+        except (KeyError, AttributeError, ValueError, TypeError):
+            bound = False
+        if not bound:
+            raise PlanError("the model's Intel quote doesn't bind its signing address and our nonce (report_data)")
         return {"signing_address": address, "nonce": nonce, "report_sha256": sha256_hex(raw),
                 "report": report, "gateway_address": (report.get("gateway_attestation") or {}).get("signing_address")}
 
@@ -320,9 +328,11 @@ class NearAI:
             self.sleep(wait)
         hashes = f"{sha256_hex(request)}:{sha256_hex(response)}"
         kind = sig.get("signature_kind", "provider_tee")
+        if kind != "provider_tee":  # only the model's own attested key; the gateway's isn't bound to a quote
+            raise PlanError(f"NEAR AI signed with its {kind} key, not the model's attested key")
         if not sig["text"].endswith(hashes):
             raise PlanError("the signed text doesn't match the request and response we saw")
-        expected = att["signing_address"] if kind == "provider_tee" else (att["gateway_address"] or "")
+        expected = att["signing_address"]
         if sig["signing_address"].lower() != expected.lower():
             raise PlanError(f"signed by {sig['signing_address']}, not the attested {kind} key {expected}")
         if not signature_ok(sig["text"], sig["signature"], sig["signing_address"], sig.get("signing_algo", "ecdsa")):

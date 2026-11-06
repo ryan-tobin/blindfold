@@ -78,7 +78,10 @@ def main() -> None:
                                {"dataset_id": dataset, "spec_hash": spec_hash, "epsilon": epsilon})
     print(f"paid: request {request_id}, tx {tx}")
 
-    out = post(a.engine, "/query", {"request_id": int(request_id), "spec": raw})
+    body = {"request_id": int(request_id), "spec": raw}
+    if a.question and plan.get("plan_id"):
+        body["plan_id"] = plan["plan_id"]  # puts the model's signature in the receipt
+    out = post(a.engine, "/query", body)
     print(json.dumps(out, indent=2, ensure_ascii=False))
 
 

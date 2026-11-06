@@ -162,6 +162,7 @@ def main() -> None:
             e["skipped"] = "plan only"
             continue
 
+        signed = {"plan_id": plan["plan_id"]} if plan.get("plan_id") else {}  # the model's signature goes in the receipt
         if near:
             dataset = near.view(a.contract, "get_dataset", {"id": plan["spec"]["dataset"]})
             balance = near.view(a.contract, "get_balance", {"account_id": a.buyer})
@@ -176,11 +177,11 @@ def main() -> None:
                                          {"dataset_id": dataset["id"], "spec_hash": plan["spec_hash"], "epsilon": eps})
             e["request_id"] = int(rid)
             print(f"  paid {usdc_text(e['price'])} USDC: request {rid}, {tx_link(a.network, e['pay_tx'])}")
-            out = http_json("POST", engine + "/query", {"request_id": e["request_id"], "spec": plan["spec"]})
+            out = http_json("POST", engine + "/query", {"request_id": e["request_id"], "spec": plan["spec"], **signed})
             onchain = near.view(a.contract, "get_request", {"id": str(e["request_id"])})
             e["onchain_ok"] = onchain["status"] == out["status"] and onchain["receipt_hash"] == out["receipt_hash"]
         else:
-            out = http_json("POST", engine + "/query", {"buyer": a.buyer, "spec": plan["spec"]})
+            out = http_json("POST", engine + "/query", {"buyer": a.buyer, "spec": plan["spec"], **signed})
         e["out"] = out
         e["epsilon_charged"] = out["receipt"]["epsilon_charged"]
         name = f"{a.contract or 'local'}-{out['request_id']}.json"
