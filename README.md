@@ -185,7 +185,7 @@ To try it locally with the simulator: `make up`, then `make bundle URL=http://12
 The real enclave runs on Phala Cloud in an Intel TDX VM, from `docker-compose.tee.yml`. That file is measured into the quote, so it pins the engine image by digest, names the contract and the bundle URL, and takes no env vars or secrets. The image is built by GitHub Actions (`.github/workflows/engine-image.yml`) with a signed build provenance, so anyone can check it came from this repo:
 
 ```bash
-gh attestation verify oci://ghcr.io/ryan-tobin/blindfold-engine@sha256:e908c0d71eca45be286829608ba987ac11e3bd02d877563c0d9f580b0cdfca11 --repo ryan-tobin/blindfold
+gh attestation verify oci://ghcr.io/ryan-tobin/blindfold-engine@sha256:daa68ac28022351e847905d0aa8577e6b7fed1162293eb0d2a30fb17d7db32f7 --repo ryan-tobin/blindfold
 ```
 
 Pointed at the real enclave, `make verify` checks the whole chain: the quote is signed by a genuine Intel TDX CPU (dcap-qvl, up to Intel's root CA, with Phala's PCCS for revocation lists and TCB status), report_data binds the keys and schema, the event log replays to the quote's RTMR0-3 (dstack 0.5.12 leaves the RTMR3 digests empty, so the verifier computes each one from its event), its compose hash is `sha256(app_compose)`, and app_compose holds this repo's `docker-compose.tee.yml` byte for byte. The OS image hash is in the quote too; the image itself is dstack's, which Phala's key service checks before releasing keys, and the verifier doesn't rebuild it.
@@ -432,17 +432,17 @@ Both enclaves run the same engine image, on Phala Cloud (Intel TDX, dstack 0.5.1
 | --- | --- | --- |
 | URL (started for demos) | `https://87eb46e50a2a931b1f84dfeff6cb89bf77e9cff0-8000.dstack-pha-prod5.phala.network` | `https://ad57f4701c05bfdc2fe85c8afbaf8d046499a8d5-8000.dstack-pha-prod9.phala.network` |
 | App id | `87eb46e50a2a931b1f84dfeff6cb89bf77e9cff0` | `ad57f4701c05bfdc2fe85c8afbaf8d046499a8d5` |
-| Compose hash (registered on-chain) | `91b520758464d565…` (Day 10 image; was `2df57d50…292a`) | `8380732b7ee494b4…` (Day 10 image; was `a12ccebe…4b16`) |
-| Engine image | `ghcr.io/ryan-tobin/blindfold-engine@sha256:e908c0d71eca45be286829608ba987ac11e3bd02d877563c0d9f580b0cdfca11` | the same |
+| Compose hash (registered on-chain) | `978b427e97573d4b…` (security-review image; was `91b52075…`, Day 10) | `bfd55c850494dd29…` (security-review image; was `8380732b…`, Day 10) |
+| Engine image | `ghcr.io/ryan-tobin/blindfold-engine@sha256:daa68ac28022351e847905d0aa8577e6b7fed1162293eb0d2a30fb17d7db32f7` | the same |
 | Enclave NEAR account | `b654d7e23d33e9bcc3096295ee4c85877f9e6c6dfc5b0f02960dd263dba91146` | `e637acc95c667ca5cfc7806a1d1459f7ece3dbe0dd26ed92403f0b48cec9bd6d` |
 | Signer key | `ed25519:DGkEji4hQLxUYbDCYKFA5RwMJ8wfAjWKaREnwX6TpbuX` | `ed25519:GVg1ZbpCZDLUirwVcBtvXMezeJEo62gfKtK9PVzDHYdA` |
-| Quote hash (registered on-chain) | `TESTNET_QUOTE_HASH` | `MAINNET_QUOTE_HASH` |
+| Quote hash (registered on-chain) | `6b53eae72a172735c5904e48fd72f1ddaebc4b255d78391a3df171e4cc3d5f0e` | `065fac1c72344f60e3a3b7224005237ae41a0975a3403c232f5e70bc81cd46d3` |
 | Encrypted bundle | [`riverside-v1`](https://github.com/ryan-tobin/blindfold/releases/tag/riverside-v1), SHA-256 `f67024c6e0678a34f02b1b0bc99ff9d796169ba9fc343fd3dfab211211b039ce` | [`riverside-mainnet-v1`](https://github.com/ryan-tobin/blindfold/releases/tag/riverside-mainnet-v1), SHA-256 `5a094f8d205aafa5c95d940886234b20cc155607ecf8442847f1443d7f2252c0` |
 
 The mainnet enclave is a separate Phala app, so the key service gave it its own keys, and the owner encrypted a second bundle to them. Check the engine image came from this repo:
 
 ```bash
-gh attestation verify oci://ghcr.io/ryan-tobin/blindfold-engine@sha256:e908c0d71eca45be286829608ba987ac11e3bd02d877563c0d9f580b0cdfca11 --repo ryan-tobin/blindfold
+gh attestation verify oci://ghcr.io/ryan-tobin/blindfold-engine@sha256:daa68ac28022351e847905d0aa8577e6b7fed1162293eb0d2a30fb17d7db32f7 --repo ryan-tobin/blindfold
 ```
 
 Check them yourself while they're running:
@@ -452,7 +452,7 @@ make verify REQUEST=3 CONTRACT_ID=blindfold.ryan-tobin.testnet URL=<testnet URL>
 make verify REQUEST=0 CONTRACT_ID=blindfold.ryan-tobin.near NEAR_NETWORK=mainnet URL=<mainnet URL> COMPOSE=docker-compose.mainnet.yml
 ```
 
-Testnet request 3 was paid by the buyer agent and answered and settled inside the enclave; every check passes. Mainnet request 0 is the first question paid with real USDC: `ryan-tobin.near` deposited 0.9 of the bridged USDC, set caps of 0.05 a question and 0.5 a day, and its agent key paid 0.05 USDC in [this transaction](https://nearblocks.io/txns/GiyUrmw7F69j9tiXFgoeJvFAEtk2MF7YBvu9TWXF2ZDq). Its receipt hash is `05a6f0f9e1d9f0070fec1553fac35a2e5480df775d7978e3e726b5e93e679837`, and all 24 checks pass. The Day 7 testnet run (request 2, settled in [this transaction](https://testnet.nearblocks.io/txns/8B2Aape5LfR7dQ3Gih3Wj76zDehCxPGVpJ3bDdqqBxbA)) was signed by the same testnet enclave key under the earlier compose hash `b6f5b259…b583`. Requests answered before Day 10 name their own compose hashes (`2df57d50…` testnet, `a12ccebe…` mainnet), so `make verify` on them now shows the compose check in yellow: the enclave has since been upgraded and re-registered under the Day 10 image, with the same keys.
+Testnet request 3 was paid by the buyer agent and answered and settled inside the enclave; every check passes. Mainnet request 0 is the first question paid with real USDC: `ryan-tobin.near` deposited 0.9 of the bridged USDC, set caps of 0.05 a question and 0.5 a day, and its agent key paid 0.05 USDC in [this transaction](https://nearblocks.io/txns/GiyUrmw7F69j9tiXFgoeJvFAEtk2MF7YBvu9TWXF2ZDq). Its receipt hash is `05a6f0f9e1d9f0070fec1553fac35a2e5480df775d7978e3e726b5e93e679837`, and all 24 checks pass. The Day 7 testnet run (request 2, settled in [this transaction](https://testnet.nearblocks.io/txns/8B2Aape5LfR7dQ3Gih3Wj76zDehCxPGVpJ3bDdqqBxbA)) was signed by the same testnet enclave key under the earlier compose hash `b6f5b259…b583`. Requests answered before the Nov 6 security-review upgrade name their own compose hashes (`91b52075…` and `2df57d50…` testnet, `8380732b…` and `a12ccebe…` mainnet), so `make verify` on them now shows the compose check in yellow: the enclaves have since been upgraded and re-registered under the security-review image, with the same keys.
 
 ## Built during the hackathon
 
