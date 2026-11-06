@@ -16,7 +16,7 @@ export function Owner({ net, connector, account }) {
   }, [net, tick]);
 
   if (!net.contract) {
-    return <section className="panel"><h2>Owner</h2><p className="note">Local mode has no contract, so there is no listing. Pick testnet or mainnet.</p></section>;
+    return <section className="panel"><h2>Owner</h2><p className="note">Local mode has no contract, so there is no listing. Pick testnet or mainnet in the header.</p></section>;
   }
   return (
     <>
@@ -60,15 +60,18 @@ function Listing({ d, net, connector, account, onChange }) {
 
   return (
     <section className="panel owner">
-      <h2>{d.id} <span className={`badge ${d.active ? "open" : "closed"}`}>{d.active ? "open" : "paused"}</span></h2>
+      <div className="panel-head">
+        <h2>{d.id}</h2>
+        <span className={`state ${d.active ? "open" : "closed"}`}><i className="dot" />{d.active ? "Open" : "Paused"}</span>
+      </div>
       <dl className="facts">
         <dt>Owner</dt><dd>{d.owner}{mine && " (you)"}</dd>
-        <dt>Price</dt><dd>{Number(d.price) ? `${usdc(d.price)} a question` : "free"}</dd>
+        <dt>Price</dt><dd>{Number(d.price) ? `${usdc(d.price)} a question` : "Free"}</dd>
         <dt>Budget</dt><dd>{(d.epsilon_total - d.epsilon_spent) / 1e6} of {d.epsilon_total / 1e6} ε left, {d.epsilon_pending / 1e6} held</dd>
         <dt>Questions</dt><dd>{count("answered")} answered, {count("refused")} refused, {count("expired")} expired, {count("pending")} pending (last 100)</dd>
         <dt>Earned</dt><dd>{usdc(paid)} from answers in the last 100 · {earned == null ? "…" : usdc(earned)} ready to withdraw</dd>
         <dt>Schema</dt><dd><code>{d.schema_hash}</code></dd>
-        <dt>Bundle</dt><dd><code>{d.bundle_hash || "none yet"}</code></dd>
+        <dt>Bundle</dt><dd>{d.bundle_hash ? <code>{d.bundle_hash}</code> : "None yet"}</dd>
       </dl>
       {mine ? (
         <div className="owner-actions">
@@ -85,10 +88,10 @@ function Listing({ d, net, connector, account, onChange }) {
             </button>
             {busy && <span className="step">Waiting for your wallet…</span>}
           </div>
-          <p className="note">The privacy budget can't be raised: once it's spent, the dataset stays closed.</p>
+          <p className="note">The privacy budget can't be raised: once it's spent, the dataset stays closed</p>
         </div>
       ) : (
-        <p className="note">{account ? "You aren't this dataset's owner." : "Connect the owner's wallet to change the price, pause, or withdraw."}</p>
+        <p className="note">{account ? "You aren't this dataset's owner" : "Connect the owner's wallet to change the price, pause or withdraw"}</p>
       )}
       {error && <p className="error">{error}</p>}
     </section>
@@ -122,7 +125,7 @@ function NewListing({ net, connector, account, onChange }) {
 
   return (
     <details className="panel">
-      <summary><strong>List a new dataset</strong></summary>
+      <summary><h2>List a new dataset</h2></summary>
       <p className="note">
         Lists a dataset under your account. The schema hash defaults to this repo's Riverside schema.json.
         Leave the bundle hash empty for now: <code>make bundle</code> encrypts your tables to the enclave's key

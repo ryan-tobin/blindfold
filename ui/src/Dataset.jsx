@@ -1,8 +1,10 @@
 // The dataset card (with the privacy meter) and the feed of recent questions.
-import { Meter } from "./charts.jsx";
+import { Eps, Meter } from "./charts.jsx";
+import { Icon } from "./icons.jsx";
 import { usdc } from "./api.js";
 
-const MODES = { tdx: "Intel TDX enclave", simulated: "simulated enclave", dev: "dev mode, no enclave" };
+const MODES = { tdx: "Intel TDX enclave", simulated: "Simulated enclave", dev: "Dev mode, no enclave" };
+const STATUS = { answered: "Answered", refused: "Refused", expired: "Expired", pending: "Pending" };
 
 export function DatasetCard({ schema, dataset, info, schemaOk, net }) {
   return (
@@ -15,19 +17,25 @@ export function DatasetCard({ schema, dataset, info, schemaOk, net }) {
       )}
       <dl className="facts">
         <dt>Price</dt>
-        <dd>{dataset ? (Number(dataset.price) ? `${usdc(dataset.price)} a question, in USDC` : "free") : "…"}</dd>
+        <dd>{dataset ? (Number(dataset.price) ? `${usdc(dataset.price)} a question, in USDC` : "Free") : "…"}</dd>
         <dt>Owner</dt>
         <dd>{dataset?.owner ?? "…"}</dd>
         <dt>Engine</dt>
-        <dd>{info ? `${MODES[info.mode] ?? info.mode}, online` : "offline (start the VM)"}</dd>
+        <dd>{info ? `${MODES[info.mode] ?? info.mode}, online` : "Offline (start the VM)"}</dd>
         {net.contract && (
           <>
             <dt>Schema</dt>
-            <dd>{schemaOk == null ? "…" : schemaOk ? "matches the hash on-chain ✓" : "differs from the hash on-chain ✗"}</dd>
+            <dd className={schemaOk == null ? "" : schemaOk ? "ok" : "bad"}>
+              {schemaOk == null ? "…" : schemaOk ? (
+                <><Icon name="pass" />Matches the hash on-chain</>
+              ) : (
+                <><Icon name="fail" />Differs from the hash on-chain</>
+              )}
+            </dd>
           </>
         )}
       </dl>
-      <details>
+      <details className="schema">
         <summary>What a question can use</summary>
         <ul className="tables">
           {Object.entries(schema.tables).map(([name, t]) => (
@@ -50,27 +58,30 @@ function ago(ns) {
 }
 
 function what(r) {
-  if (r.status === "answered") return `ε ${r.epsilon_charged / 1e6} spent`;
-  if (r.status === "refused") return `${r.refusal} · refunded`;
-  if (r.status === "expired") return "expired · refunded";
-  return `ε ${r.epsilon / 1e6} held`;
+  if (r.status === "answered") return <><Eps v={r.epsilon_charged / 1e6} /> spent</>;
+  if (r.status === "refused") return <><code>{r.refusal}</code> · refunded</>;
+  if (r.status === "expired") return "Refunded";
+  return <><Eps v={r.epsilon / 1e6} /> held</>;
 }
 
 export function Feed({ rows, local, onVerify }) {
   return (
     <section className="panel feed">
-      <h2>Recent questions <span className="note">{local ? "this session" : "read from the contract"}</span></h2>
-      {rows.length === 0 && <p className="note">No questions yet.</p>}
+      <div className="panel-head">
+        <h2>Recent questions</h2>
+        <span className="meta">{local ? "This session" : "Read from the contract"}</span>
+      </div>
+      {rows.length === 0 && <p className="note">No questions yet</p>}
       <ol>
         {rows.map((r) => (
           <li key={r.id} className={`feed-row ${r.status}`}>
             <span className="feed-id">#{r.id}</span>
-            <span className="feed-status">{r.status}</span>
-            <span>{what(r)}</span>
+            <span className="feed-status"><i className="dot" />{STATUS[r.status] ?? r.status}</span>
+            <span className="feed-what">{what(r)}</span>
             <span className="feed-buyer" title={r.buyer}>{r.buyer}</span>
             <span className="feed-time">{ago(r.created_at)}</span>
             {r.status === "answered" || r.status === "refused" ? (
-              <button className="feed-verify" onClick={() => onVerify({ id: Number(r.id) })}>verify</button>
+              <button className="small" onClick={() => onVerify({ id: Number(r.id) })}>Verify</button>
             ) : <span />}
           </li>
         ))}

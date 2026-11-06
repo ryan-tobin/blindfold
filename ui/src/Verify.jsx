@@ -1,9 +1,10 @@
 // The verify screen: anyone can check a receipt here, with no account.
 import { useEffect, useState } from "react";
 import { verifyReceipt } from "./verify.js";
+import { Icon } from "./icons.jsx";
 
-const MARK = { true: "✓", null: "!", false: "✗" };
 const CLASS = { true: "pass", null: "warn", false: "fail" };
+const LABEL = { true: "Passed", null: "Passed with a warning", false: "Failed" };
 
 export function Verify({ net, target }) {
   const [id, setId] = useState(target?.id ?? "");
@@ -46,16 +47,17 @@ export function Verify({ net, target }) {
       {error && <p className="error">{error}</p>}
       {out && (
         <>
-          <p className="note">
-            Request #{out.receipt.request_id}, {out.receipt.status}, receipt <code>{out.hash.slice(0, 16)}…</code>
+          <p className="receipt">
+            <span className="stub" title={out.hash}>Receipt {out.hash.slice(0, 16)}…</span>
+            <span className="note">Request #{out.receipt.request_id}, {out.receipt.status}</span>
           </p>
           <div className="checks">
             {out.groups.map((g) => (
               <div key={g.title} className={`check-group ${CLASS[g.ok]}`}>
-                <h3><span className="mark">{MARK[g.ok]}</span>{g.title}</h3>
+                <h3><Icon name={CLASS[g.ok]} label={LABEL[g.ok]} />{g.title}</h3>
                 <ul>
                   {g.checks.map((c) => (
-                    <li key={c.text} className={CLASS[c.ok]}><span className="mark">{MARK[c.ok]}</span>{c.text}</li>
+                    <li key={c.text} className={CLASS[c.ok]}><Icon name={CLASS[c.ok]} label={LABEL[c.ok]} />{c.text}</li>
                   ))}
                 </ul>
               </div>

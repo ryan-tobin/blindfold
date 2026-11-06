@@ -98,14 +98,14 @@ export default function App() {
       <header>
         <div className="brand">
           <strong>Blindfold</strong>
-          <span>answers, not data</span>
+          <span>Answers, not data</span>
         </div>
         <div className="row">
-          <select value={NET_NAME} onChange={(e) => { location.search = `?net=${e.target.value}&tab=${tab}`; }}>
+          <select aria-label="Network" value={NET_NAME} onChange={(e) => { location.search = `?net=${e.target.value}&tab=${tab}`; }}>
             {Object.keys(NETWORKS).map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
           {connector && (account ? (
-            <button onClick={() => connector.disconnect()} title="Sign out">{account}</button>
+            <button className="account" onClick={() => connector.disconnect()} title="Sign out">{account}</button>
           ) : (
             <button className="primary" onClick={() => connector.connect().catch((e) => setError(e.message))}>
               Connect wallet
@@ -119,9 +119,10 @@ export default function App() {
           {usdc(balance.daily_max)} a day ({usdc(balance.spent_today)} spent today)
         </p>
       )}
-      <nav className="tabs">
+      <nav className="tabs" aria-label="Sections">
         {Object.entries(TABS).map(([name, label]) => (
-          <button key={name} className={tab === name ? "active" : ""} onClick={() => go(name)}>{label}</button>
+          <button key={name} className={tab === name ? "active" : ""} aria-current={tab === name ? "page" : undefined}
+                  onClick={() => go(name)}>{label}</button>
         ))}
       </nav>
       <main>
@@ -139,9 +140,9 @@ export default function App() {
       <footer>
         {NET.contract ? (
           <>Contract <a href={`${NET.explorer}/address/${NET.contract}`} target="_blank" rel="noreferrer">
-            {NET.contract}</a> · engine {NET.engine.replace("https://", "").slice(0, 16)}…</>
+            {NET.contract}</a> · engine <code>{NET.engine.replace("https://", "").slice(0, 16)}…</code></>
         ) : (
-          <>Local mode: engine at {NET.engine}, nothing is paid</>
+          <>Local mode: engine at <code>{NET.engine}</code>, nothing is paid</>
         )}
       </footer>
     </>

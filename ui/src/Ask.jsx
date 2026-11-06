@@ -1,7 +1,7 @@
 // Ask: plain English in, the plan shown before paying, then pay, answer and receipt.
 import { useState } from "react";
 import questions from "../../datasets/riverside/planner_questions.json";
-import { AnswerChart } from "./charts.jsx";
+import { AnswerChart, Eps } from "./charts.jsx";
 import { engine, engineRaw, payForPlan, precheck, usdc } from "./api.js";
 import { canonical, sha256hex } from "./canon.js";
 
@@ -84,7 +84,7 @@ export function Ask({ net, connector, account, dataset, balance, onAnswered, onV
 
   let blocker = null;
   if (plan?.will_refuse && !(attack && plan.spec)) blocker = `The engine will refuse this (${plan.will_refuse.rule}): ${plan.will_refuse.reason}`;
-  else if (plan && !local && !account) blocker = "Connect a wallet to pay.";
+  else if (plan && !local && !account) blocker = "Connect a wallet to pay";
   else if (plan && !local && dataset && balance) blocker = precheck(dataset, balance, plan.epsilon);
 
   return (
@@ -96,23 +96,24 @@ export function Ask({ net, connector, account, dataset, balance, onAnswered, onV
           Attack mode
         </label>
       </div>
-      <div className="chips" hidden={attack}>
+      <div className="suggestions" hidden={attack}>
         {DEMO.map((q) => (
-          <button key={q} className="chip" onClick={() => pick(q)} disabled={busy}>{q}</button>
+          <button key={q} className={q === question ? "suggestion current" : "suggestion"}
+                  onClick={() => pick(q)} disabled={busy}>{q}</button>
         ))}
       </div>
       <textarea value={question} rows={3} maxLength={500}
                 onChange={(e) => { setQuestion(e.target.value); setPlan(null); setResult(null); }} />
       <div className="row">
-        <button onClick={planIt} disabled={busy || question.trim().length < 3}>Plan it (free)</button>
-        {step && <span className="step">{step}</span>}
+        <button onClick={planIt} disabled={busy || question.trim().length < 3}>Plan it</button>
+        {step ? <span className="step">{step}</span> : !plan && <span className="note">Planning is free</span>}
       </div>
 
       {plan && (
         <div className="plan">
           <p className="summary">{plan.summary || "No QuerySpec"}</p>
           <p className="note">
-            ε {plan.epsilon ?? "–"} · {plan.price ? usdc(plan.price.amount) : "free (local mode)"} ·{" "}
+            <Eps v={plan.epsilon ?? "–"} /> · {plan.price ? usdc(plan.price.amount) : "free (local mode)"} ·{" "}
             {plan.premade ? "planned ahead of time, so the demo doesn't wait on the model"
               : plan.model ? `planned by ${plan.model} in an attested TEE, signature checked` : "planned by the offline stub"}
           </p>
@@ -156,15 +157,14 @@ function Answer({ result, net, onVerify }) {
       )}
       <p className="note">
         {result.answer && `${Math.round(result.answer.level * 100)}% error bars for the noise · `}
-        ε {r.epsilon_charged} spent, {r.epsilon_remaining} left
+        <Eps v={r.epsilon_charged} /> spent, <Eps v={r.epsilon_remaining} /> left
         {result.replay_of != null && ` · the same answer as #${result.replay_of}, so no ε spent`}
       </p>
       <p className="receipt">
-        <span className="receipt-chip" title={result.receipt_hash}>
-          receipt {result.receipt_hash.slice(0, 12)}… signed in the enclave
-        </span>
-        {link(result.pay_tx, "payment")}
-        {link(result.settle_tx, "settlement")}
+        <span className="stub" title={result.receipt_hash}>Receipt {result.receipt_hash.slice(0, 12)}…</span>
+        <span className="note">Signed in the enclave</span>
+        {link(result.pay_tx, "Payment")}
+        {link(result.settle_tx, "Settlement")}
         <button onClick={() => onVerify({ id: result.request_id, queryText: result.raw })}>Verify this receipt</button>
       </p>
     </div>
